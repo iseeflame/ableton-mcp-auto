@@ -5,6 +5,7 @@ description = "Ableton Live integration through the Model Context Protocol, with
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
+    {name = "Mark Streletsky", email = "iseeflame333@gmail.com"},
     {name = "Siddharth Ahuja", email = "ahujasid@gmail.com"}
 ]
 license = {text = "MIT"}
