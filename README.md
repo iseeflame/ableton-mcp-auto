@@ -27,7 +27,8 @@ parameters inside clips.
 
 - **Two-way communication**: socket-based server bridging the MCP client and Ableton Live
 - **Track manipulation**: create MIDI, audio and return tracks; rename and delete them *(fork)*
-- **Instrument and effect selection**: load instruments, effects and sounds from Live's browser
+- **Instrument and effect selection**: load instruments, effects and sounds from Live's browser,
+  including the user folders in its Places sidebar *(fork)*
 - **Clip creation**: create MIDI clips, and read, edit and delete their notes *(fork)*
 - **Device parameters**: read and set any device parameter, plus track volume/pan/sends *(fork)*
 - **Clip automation**: write, read back and clear clip envelopes, including approximated ramps *(fork)*
@@ -98,12 +99,24 @@ so the move is checked with `find_device_position` first: the reply says where t
 actually landed and flags any difference, and moves that cannot work at all (an instrument
 onto an audio track) are refused rather than relocated.
 
+### Reaching your own sample folders
+
+Upstream resolves a browser path by matching its first segment against a *named attribute*
+of the browser — `instruments`, `drums`, `sounds`. The folders you add to Live's Places
+sidebar are not attributes; they sit in a list, so a folder called `Scale` had nothing to
+match and was invisible.
+
+`get_browser_items_at_path("places")` now lists those folders, and
+`"places/<folder>/..."` descends into one like any other path. Your own sample libraries
+and preset collections are reachable the same way as Live's factory content.
+
 ### Asking Live what it can do
 
 `describe_live_api` is a development aid, not a music tool. Live's Python API is
 Boost.Python, which stores each method's real signature in its docstring, so this answers
 "what arguments does `move_device` take" from the build in front of you rather than from
-documentation that may not match it. It also lists members that *raise* on access — Live
+documentation that may not match it. Paths start at the song by default; pass
+`root="app"` or `root="browser"` to inspect those instead. It also lists members that *raise* on access — Live
 signals an inapplicable property by throwing, which is easy to mistake for a bug elsewhere,
 and which cost this fork several debugging rounds before the pattern became obvious.
 

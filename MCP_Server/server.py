@@ -701,7 +701,10 @@ def get_browser_items_at_path(ctx: Context, path: str) -> str:
     Parameters:
     - path: Path in the format "category/folder/subfolder"
             where category is one of the available browser categories in Ableton
-    """
+    
+    User folders added to Live's sidebar are reachable too: "places" lists them,
+    and "places/<folder name>/..." descends into one.
+"""
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("get_browser_items_at_path", {
@@ -1548,7 +1551,12 @@ def move_device(
 
 @mcp.tool()
 @telemetry_tool("describe_live_api")
-def describe_live_api(ctx: Context, path: str = "", include_members: bool = True) -> str:
+def describe_live_api(
+    ctx: Context,
+    path: str = "",
+    include_members: bool = True,
+    root: str = "song"
+) -> str:
     """
     Inspect Live's own API from inside the running application.
 
@@ -1567,14 +1575,16 @@ def describe_live_api(ctx: Context, path: str = "", include_members: bool = True
     Read-only: it resolves attributes and reads docstrings, and never calls anything.
 
     Parameters:
-    - path:            Dotted path from the song object (default: the song itself)
+    - path:            Dotted path from the chosen root (default: the root itself)
     - include_members: List the object's methods and properties (default true)
+    - root:            Where the path starts: "song" (default), "app", or "browser"
     """
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("describe_live_api", {
             "path": path,
-            "include_members": include_members
+            "include_members": include_members,
+            "root": root
         })
         return json.dumps(result, indent=2)
     except Exception as e:

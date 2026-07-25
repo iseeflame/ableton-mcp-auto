@@ -463,7 +463,8 @@ class AbletonMCP(ControlSurface):
             elif command_type == "describe_live_api":
                 response["result"] = self._describe_live_api(
                     params.get("path", ""),
-                    params.get("include_members", True))
+                    params.get("include_members", True),
+                    params.get("root", "song"))
             elif command_type == "convert_display_values":
                 response["result"] = self._convert_display_values(
                     params.get("track_index", 0),
@@ -1663,7 +1664,7 @@ class AbletonMCP(ControlSurface):
     MIN_ENVELOPE_SAMPLES = 2
     MAX_ENVELOPE_SAMPLES = 512
 
-    def _describe_live_api(self, path, include_members):
+    def _describe_live_api(self, path, include_members, root="song"):
         """Report what Live's own objects expose, resolved from song by dotted path.
 
         The Live API is Boost.Python, which keeps each method's signature in its
@@ -1673,8 +1674,19 @@ class AbletonMCP(ControlSurface):
 
         Read-only: it resolves attributes and reads docstrings, never calls anything."""
         try:
-            target = self._song
-            walked = ["song"]
+            root_name = str(root or "song").lower()
+            if root_name == "song":
+                target = self._song
+            elif root_name in ("app", "application"):
+                target = self.application()
+            elif root_name == "browser":
+                target = self.application().browser
+            else:
+                raise ValueError(
+                    "Unknown root '" + str(root) + "'; use song, app or browser")
+            if target is None:
+                raise RuntimeError("Could not reach the '" + root_name + "' object")
+            walked = [root_name]
             for segment in [p for p in str(path).split(".") if p]:
                 if segment.lstrip("-").isdigit():
                     target = target[int(segment)]
@@ -2385,9 +2397,42 @@ class AbletonMCP(ControlSurface):
             # Determine the root category
             root_category = path_parts[0].lower()
             current_item = None
+
+            descend_from = 1
+
+            # "places" reaches the folders the user added to the sidebar. They live in a
+            # list rather than as named attributes, so the folder is matched by name and
+            # the normal descent picks up from the segment after it.
+            if root_category in ("places", "user_folders"):
+                folders = list(getattr(app.browser, "user_folders", None) or [])
+                if len(path_parts) < 2 or not path_parts[1]:
+                    return {
+                        "path": path,
+                        "name": "Places",
+                        "items": [{
+                            "name": getattr(f, "name", "Unknown"),
+                            "is_folder": True,
+                            "is_device": False,
+                            "is_loadable": bool(getattr(f, "is_loadable", False)),
+                            "uri": getattr(f, "uri", None)
+                        } for f in folders]
+                    }
+                wanted = path_parts[1].lower()
+                for folder in folders:
+                    if str(getattr(folder, "name", "")).lower() == wanted:
+                        current_item = folder
+                        break
+                if current_item is None:
+                    return {
+                        "path": path,
+                        "error": "No user folder named '{0}'".format(path_parts[1]),
+                        "available_places": [getattr(f, "name", "Unknown") for f in folders],
+                        "items": []
+                    }
+                descend_from = 2
             
             # Check standard categories first
-            if root_category == "instruments" and hasattr(app.browser, 'instruments'):
+            elif root_category == "instruments" and hasattr(app.browser, 'instruments'):
                 current_item = app.browser.instruments
             elif root_category == "sounds" and hasattr(app.browser, 'sounds'):
                 current_item = app.browser.sounds
@@ -2419,7 +2464,7 @@ class AbletonMCP(ControlSurface):
                     }
             
             # Navigate through the path
-            for i in range(1, len(path_parts)):
+            for i in range(descend_from, len(path_parts)):
                 part = path_parts[i]
                 if not part:  # Skip empty parts
                     continue
