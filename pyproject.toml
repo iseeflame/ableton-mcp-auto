@@ -1,7 +1,7 @@
 [project]
-name = "ableton-mcp"
+name = "ableton-mcp-auto"
 version = "1.2.0"
-description = "Ableton Live integration through the Model Context Protocol"
+description = "Ableton Live integration through the Model Context Protocol, with mixing and automation control"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [
@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-ableton-mcp = "MCP_Server.server:main"
+ableton-mcp-auto = "MCP_Server.server:main"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
@@ -28,5 +28,6 @@ build-backend = "setuptools.build_meta"
 packages = ["MCP_Server"]
 
 [project.urls]
-"Homepage" = "https://github.com/ahujasid/ableton-mcp"
-"Bug Tracker" = "https://github.com/ahujasid/ableton-mcp/issues"
+"Homepage" = "https://github.com/iseeflame/ableton-mcp-auto"
+"Upstream" = "https://github.com/ahujasid/ableton-mcp"
+"Bug Tracker" = "https://github.com/iseeflame/ableton-mcp-auto/issues"

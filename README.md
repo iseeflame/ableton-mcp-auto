@@ -1,4 +1,4 @@
-# AbletonMCP (fork) — Ableton Live Model Context Protocol Integration
+# ableton-mcp-auto — Ableton Live Model Context Protocol Integration
 
 Connect Ableton Live to an MCP client (Claude Code, Claude Desktop, Cursor) so the model can
 drive Live directly: build tracks, load instruments, write MIDI, turn knobs, and automate
@@ -161,12 +161,12 @@ successful-looking call that writes a flat envelope at the maximum.
 ### 1. Clone the fork
 
 ```bash
-git clone <your-fork-url> ableton-mcp
+git clone https://github.com/iseeflame/ableton-mcp-auto.git
 ```
 
 ### 2. Configure your MCP client
 
-Point the client at your clone. Replace `/path/to/ableton-mcp` with wherever you cloned it.
+Point the client at your clone. Replace `/path/to/ableton-mcp-auto` with wherever you cloned it.
 
 **Claude Code** — create `.mcp.json` in your project directory:
 
@@ -175,7 +175,7 @@ Point the client at your clone. Replace `/path/to/ableton-mcp` with wherever you
   "mcpServers": {
     "AbletonMCP": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/ableton-mcp", "ableton-mcp"]
+      "args": ["run", "--directory", "/path/to/ableton-mcp-auto", "ableton-mcp-auto"]
     }
   }
 }
@@ -189,7 +189,7 @@ Start `claude` from that directory and approve the server when prompted.
 **Cursor** — Settings > MCP, and use:
 
 ```
-uv run --directory /path/to/ableton-mcp ableton-mcp
+uv run --directory /path/to/ableton-mcp-auto ableton-mcp-auto
 ```
 
 ⚠️ Run only one instance of the MCP server, not one per client.
