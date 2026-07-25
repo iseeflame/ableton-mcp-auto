@@ -280,12 +280,16 @@ class AbletonMCP(ControlSurface):
                             track_index = params.get("track_index", 0)
                             clip_index = params.get("clip_index", 0)
                             notes = params.get("notes", [])
-                            result = self._add_notes_to_clip(track_index, clip_index, notes)
+                            result = self._add_notes_to_clip(
+                                track_index, clip_index, notes,
+                                params.get("arrangement_index", None))
                         elif command_type == "set_clip_name":
                             track_index = params.get("track_index", 0)
                             clip_index = params.get("clip_index", 0)
                             name = params.get("name", "")
-                            result = self._set_clip_name(track_index, clip_index, name)
+                            result = self._set_clip_name(
+                                track_index, clip_index, name,
+                                params.get("arrangement_index", None))
                         elif command_type == "set_tempo":
                             tempo = params.get("tempo", 120.0)
                             result = self._set_tempo(tempo)
@@ -348,7 +352,8 @@ class AbletonMCP(ControlSurface):
                                 params.get("interpolate", False),
                                 params.get("step_size", 0.0625),
                                 params.get("clear_existing", True),
-                                params.get("device_path", None))
+                                params.get("device_path", None),
+                                params.get("arrangement_index", None))
                         elif command_type == "clear_clip_envelope":
                             result = self._clear_clip_envelope(
                                 params.get("track_index", 0),
@@ -356,7 +361,8 @@ class AbletonMCP(ControlSurface):
                                 params.get("device_index", 0),
                                 params.get("parameter_index", None),
                                 params.get("parameter_name", None),
-                                params.get("device_path", None))
+                                params.get("device_path", None),
+                                params.get("arrangement_index", None))
                         # ── Deletion ────────────────────────────────────────────────
                         elif command_type == "delete_clip":
                             result = self._delete_clip(
@@ -384,12 +390,14 @@ class AbletonMCP(ControlSurface):
                                 params.get("from_time", 0.0),
                                 params.get("time_span", None),
                                 params.get("from_pitch", 0),
-                                params.get("pitch_span", 128))
+                                params.get("pitch_span", 128),
+                                params.get("arrangement_index", None))
                         elif command_type == "modify_clip_notes":
                             result = self._modify_clip_notes(
                                 params.get("track_index", 0),
                                 params.get("clip_index", 0),
-                                params.get("modifications", []))
+                                params.get("modifications", []),
+                                params.get("arrangement_index", None))
                         elif command_type == "delete_device":
                             result = self._delete_device(
                                 params.get("track_index", 0),
@@ -472,7 +480,8 @@ class AbletonMCP(ControlSurface):
                     params.get("from_time", 0.0),
                     params.get("time_span", None),
                     params.get("from_pitch", 0),
-                    params.get("pitch_span", 128))
+                    params.get("pitch_span", 128),
+                    params.get("arrangement_index", None))
             elif command_type == "get_device_tree":
                 response["result"] = self._get_device_tree(
                     params.get("track_index", 0),
@@ -500,7 +509,8 @@ class AbletonMCP(ControlSurface):
                     params.get("from_time", 0.0),
                     params.get("to_time", None),
                     params.get("samples", 17),
-                    params.get("device_path", None))
+                    params.get("device_path", None),
+                    params.get("arrangement_index", None))
             else:
                 response["status"] = "error"
                 response["message"] = "Unknown command: " + command_type
@@ -779,23 +789,10 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error creating audio clip: " + str(e))
             raise
 
-    def _add_notes_to_clip(self, track_index, clip_index, notes):
-        """Add MIDI notes to a clip"""
+    def _add_notes_to_clip(self, track_index, clip_index, notes, arrangement_index=None):
+        """Add MIDI notes to a clip, in Session or in the Arrangement"""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
-            
-            track = self._song.tracks[track_index]
-            
-            if clip_index < 0 or clip_index >= len(track.clip_slots):
-                raise IndexError("Clip index out of range")
-            
-            clip_slot = track.clip_slots[clip_index]
-            
-            if not clip_slot.has_clip:
-                raise Exception("No clip in slot")
-            
-            clip = clip_slot.clip
+            clip = self._get_clip_for_envelope(track_index, clip_index, arrangement_index)
             
             # Convert note data to Live's format
             live_notes = []
@@ -819,23 +816,10 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error adding notes to clip: " + str(e))
             raise
     
-    def _set_clip_name(self, track_index, clip_index, name):
+    def _set_clip_name(self, track_index, clip_index, name, arrangement_index=None):
         """Set the name of a clip"""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
-            
-            track = self._song.tracks[track_index]
-            
-            if clip_index < 0 or clip_index >= len(track.clip_slots):
-                raise IndexError("Clip index out of range")
-            
-            clip_slot = track.clip_slots[clip_index]
-            
-            if not clip_slot.has_clip:
-                raise Exception("No clip in slot")
-            
-            clip = clip_slot.clip
+            clip = self._get_clip_for_envelope(track_index, clip_index, arrangement_index)
             clip.name = name
             
             result = {
@@ -1837,11 +1821,28 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error setting device parameter: " + str(e))
             raise
 
-    def _get_clip_for_envelope(self, track_index, clip_index):
-        """Fetch the session clip at track_index/clip_index, or raise"""
-        if track_index < 0 or track_index >= len(self._song.tracks):
-            raise IndexError("Track index out of range")
-        track = self._song.tracks[track_index]
+    def _get_clip_for_envelope(self, track_index, clip_index, arrangement_index=None):
+        """Fetch a clip: a Session slot by default, an Arrangement clip on request.
+
+        Arrangement clips are not held in clip slots but in a list of their own, ordered
+        by position on the timeline, so they need their own index rather than a slot
+        number. get_arrangement_clips lists them in the same order."""
+        track = self._resolve_track(track_index)
+
+        if arrangement_index is not None:
+            try:
+                clips = track.arrangement_clips
+            except Exception:
+                raise ValueError(
+                    "'" + track.name + "' has no arrangement clips; master, group and "
+                    "return tracks never do")
+            index = int(arrangement_index)
+            if index < 0 or index >= len(clips):
+                raise IndexError(
+                    "No arrangement clip " + str(index) + " on '" + track.name +
+                    "'; there are " + str(len(clips)))
+            return clips[index]
+
         if clip_index < 0 or clip_index >= len(track.clip_slots):
             raise IndexError("Clip index out of range")
         clip_slot = track.clip_slots[clip_index]
@@ -1852,16 +1853,23 @@ class AbletonMCP(ControlSurface):
 
     def _set_clip_envelope(self, track_index, clip_index, device_index, parameter_index,
                            parameter_name, points, interpolate, step_size, clear_existing,
-                           device_path=None):
+                           device_path=None, arrangement_index=None):
         """Write a clip automation envelope for a device/mixer parameter.
 
         points is a list of {time, value, length?} breakpoints in beats. Live's API only
         exposes flat steps (insert_step), so interpolate=True approximates a ramp between
         consecutive points with a series of step_size-wide steps."""
         try:
+            if arrangement_index is not None:
+                raise ValueError(
+                    "Clip envelopes are a Session-view feature. Live rejects "
+                    "create_automation_envelope on an Arrangement clip with \"Not a "
+                    "session clip\". Notes in Arrangement clips can be read and "
+                    "written, but their envelopes cannot, and automation on the "
+                    "Arrangement timeline is not reachable through the API at all.")
             param, owner_name, resolved_index = self._resolve_parameter(
                 track_index, device_index, parameter_index, parameter_name, device_path)
-            clip = self._get_clip_for_envelope(track_index, clip_index)
+            clip = self._get_clip_for_envelope(track_index, clip_index, arrangement_index)
 
             if not points:
                 raise ValueError("'points' must contain at least one {time, value} entry")
@@ -2033,14 +2041,14 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _get_clip_notes(self, track_index, clip_index, from_time, time_span,
-                        from_pitch, pitch_span):
+                        from_pitch, pitch_span, arrangement_index=None):
         """Read the notes already inside a MIDI clip.
 
         Live 11 offers get_notes_extended(), which carries per-note probability and
         velocity range; the older get_notes() returns plain tuples. Their argument
         orders differ, so each call site spells them out."""
         try:
-            clip = self._get_clip_for_envelope(track_index, clip_index)
+            clip = self._get_clip_for_envelope(track_index, clip_index, arrangement_index)
             if not getattr(clip, "is_midi_clip", True):
                 raise ValueError("Clip in track " + str(track_index) + ", slot " +
                                  str(clip_index) + " is an audio clip and has no notes")
@@ -2078,7 +2086,7 @@ class AbletonMCP(ControlSurface):
                     })
 
             notes.sort(key=lambda entry: (entry["start_time"], entry["pitch"]))
-            return {
+            result = {
                 "track_index": track_index,
                 "clip_index": clip_index,
                 "clip_name": clip.name,
@@ -2089,6 +2097,15 @@ class AbletonMCP(ControlSurface):
                 "note_count": len(notes),
                 "notes": notes
             }
+            if arrangement_index is not None:
+                result["arrangement_index"] = arrangement_index
+                # Where the clip sits on the timeline is the point of reading it.
+                try:
+                    result["start_time"] = float(clip.start_time)
+                    result["end_time"] = float(clip.end_time)
+                except Exception:
+                    pass
+            return result
         except Exception as e:
             self.log_message("Error reading clip notes: " + str(e))
             raise
@@ -2105,11 +2122,11 @@ class AbletonMCP(ControlSurface):
             return len(clip.get_notes(0.0, 0, float(clip.length), 128))
 
     def _remove_clip_notes(self, track_index, clip_index, from_time, time_span,
-                           from_pitch, pitch_span):
+                           from_pitch, pitch_span, arrangement_index=None):
         """Delete the notes inside a time and pitch window, leaving the clip itself -
         and therefore its automation envelopes - untouched."""
         try:
-            clip = self._get_clip_for_envelope(track_index, clip_index)
+            clip = self._get_clip_for_envelope(track_index, clip_index, arrangement_index)
             if not getattr(clip, "is_midi_clip", True):
                 raise ValueError("Clip in track " + str(track_index) + ", slot " +
                                  str(clip_index) + " is an audio clip and has no notes")
@@ -2142,14 +2159,15 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error removing clip notes: " + str(e))
             raise
 
-    def _modify_clip_notes(self, track_index, clip_index, modifications):
+    def _modify_clip_notes(self, track_index, clip_index, modifications,
+                           arrangement_index=None):
         """Change existing notes in place, addressed by the note_id from get_clip_notes.
 
         apply_note_modifications() wants the note objects Live handed out, so the clip
         vector is fetched, the requested members are mutated, and the whole vector goes
         back. Constructing MidiNote objects from scratch is not required."""
         try:
-            clip = self._get_clip_for_envelope(track_index, clip_index)
+            clip = self._get_clip_for_envelope(track_index, clip_index, arrangement_index)
             if not hasattr(clip, "apply_note_modifications"):
                 raise RuntimeError(
                     "This Live version cannot modify notes in place. Use "
@@ -2224,15 +2242,23 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _get_clip_envelope(self, track_index, clip_index, device_index, parameter_index,
-                           parameter_name, from_time, to_time, samples, device_path=None):
+                           parameter_name, from_time, to_time, samples, device_path=None,
+                           arrangement_index=None):
         """Sample an existing clip envelope at evenly spaced times.
 
         Live exposes no way to enumerate an envelope's breakpoints, so the shape is
         reconstructed by evaluating value_at_time() across the requested range."""
         try:
+            if arrangement_index is not None:
+                raise ValueError(
+                    "Clip envelopes are a Session-view feature. Live rejects "
+                    "create_automation_envelope on an Arrangement clip with \"Not a "
+                    "session clip\". Notes in Arrangement clips can be read and "
+                    "written, but their envelopes cannot, and automation on the "
+                    "Arrangement timeline is not reachable through the API at all.")
             param, owner_name, resolved_index = self._resolve_parameter(
                 track_index, device_index, parameter_index, parameter_name, device_path)
-            clip = self._get_clip_for_envelope(track_index, clip_index)
+            clip = self._get_clip_for_envelope(track_index, clip_index, arrangement_index)
 
             result = {
                 "track_index": track_index,
@@ -2289,12 +2315,20 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _clear_clip_envelope(self, track_index, clip_index, device_index,
-                             parameter_index, parameter_name, device_path=None):
+                             parameter_index, parameter_name, device_path=None,
+                             arrangement_index=None):
         """Remove the clip automation envelope for a device/mixer parameter"""
         try:
+            if arrangement_index is not None:
+                raise ValueError(
+                    "Clip envelopes are a Session-view feature. Live rejects "
+                    "create_automation_envelope on an Arrangement clip with \"Not a "
+                    "session clip\". Notes in Arrangement clips can be read and "
+                    "written, but their envelopes cannot, and automation on the "
+                    "Arrangement timeline is not reachable through the API at all.")
             param, owner_name, resolved_index = self._resolve_parameter(
                 track_index, device_index, parameter_index, parameter_name, device_path)
-            clip = self._get_clip_for_envelope(track_index, clip_index)
+            clip = self._get_clip_for_envelope(track_index, clip_index, arrangement_index)
             clip.clear_envelope(param)
             return {
                 "success": True,

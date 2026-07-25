@@ -444,8 +444,9 @@ def create_audio_clip(ctx: Context, track_index: int, clip_index: int, path: str
 def add_notes_to_clip(
     ctx: Context,
     track_index: int,
-    clip_index: int,
-    notes: List[Dict[str, Union[int, float, bool]]]
+    notes: List[Dict[str, Union[int, float, bool]]],
+    clip_index: int = 0,
+    arrangement_index: Optional[int] = None
 ) -> str:
     """
     Add MIDI notes to a clip.
@@ -454,13 +455,16 @@ def add_notes_to_clip(
     - track_index: The index of the track containing the clip
     - clip_index: The index of the clip slot containing the clip
     - notes: List of note dictionaries, each with pitch, start_time, duration, velocity, and mute
+    - arrangement_index: Index into the track's Arrangement clips instead of a Session
+                       slot, as listed by get_arrangement_clips; overrides clip_index
     """
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("add_notes_to_clip", {
             "track_index": track_index,
             "clip_index": clip_index,
-            "notes": notes
+            "notes": notes,
+            "arrangement_index": arrangement_index
         })
         return f"Added {len(notes)} notes to clip at track {track_index}, slot {clip_index}"
     except Exception as e:
@@ -469,7 +473,13 @@ def add_notes_to_clip(
 
 @mcp.tool()
 @rich_telemetry_tool("set_clip_name")
-def set_clip_name(ctx: Context, track_index: int, clip_index: int, name: str) -> str:
+def set_clip_name(
+    ctx: Context,
+    track_index: int,
+    name: str,
+    clip_index: int = 0,
+    arrangement_index: Optional[int] = None
+) -> str:
     """
     Set the name of a clip.
 
@@ -477,13 +487,16 @@ def set_clip_name(ctx: Context, track_index: int, clip_index: int, name: str) ->
     - track_index: The index of the track containing the clip
     - clip_index: The index of the clip slot containing the clip
     - name: The new name for the clip
+    - arrangement_index: Index into the track's Arrangement clips instead of a Session
+                       slot, as listed by get_arrangement_clips; overrides clip_index
     """
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("set_clip_name", {
             "track_index": track_index,
             "clip_index": clip_index,
-            "name": name
+            "name": name,
+            "arrangement_index": arrangement_index
         })
         return f"Renamed clip at track {track_index}, slot {clip_index} to '{name}'"
     except Exception as e:
@@ -1017,15 +1030,16 @@ def set_mixer_parameter(
 def set_clip_envelope(
     ctx: Context,
     track_index: int,
-    clip_index: int,
     points: List[Dict[str, float]],
+    clip_index: int = 0,
     device_index: int = 0,
     parameter_index: Optional[int] = None,
     parameter_name: Optional[str] = None,
     interpolate: bool = False,
     step_size: float = 0.0625,
     clear_existing: bool = True,
-    device_path: Optional[str] = None
+    device_path: Optional[str] = None,
+    arrangement_index: Optional[int] = None
 ) -> str:
     """
     Write a clip automation envelope for a device or mixer parameter.
@@ -1057,6 +1071,10 @@ def set_clip_envelope(
     - clear_existing:  Clear any existing envelope for this parameter first
     - device_path:     Path from get_device_tree, to reach a device nested inside a
                        rack (a plugin on one drum pad, say); overrides device_index
+    - arrangement_index: Index into the track's Arrangement clips instead of a Session
+                       slot, as listed by get_arrangement_clips; overrides clip_index
+    Session clips only: Live refuses clip envelopes on Arrangement clips, so
+    arrangement_index is rejected here even though the note tools accept it.
     """
     try:
         ableton = get_ableton_connection()
@@ -1107,7 +1125,8 @@ def set_clip_envelope(
                 "interpolate": interpolate,
                 "step_size": step_size,
                 "clear_existing": clear_existing,
-                "device_path": device_path
+                "device_path": device_path,
+                "arrangement_index": arrangement_index
             })
         finally:
             # The breakpoint is fixed once the steps exist, so the knob can go back.
@@ -1139,14 +1158,15 @@ def set_clip_envelope(
 def get_clip_envelope(
     ctx: Context,
     track_index: int,
-    clip_index: int,
+    clip_index: int = 0,
     device_index: int = 0,
     parameter_index: Optional[int] = None,
     parameter_name: Optional[str] = None,
     from_time: float = 0.0,
     to_time: Optional[float] = None,
     samples: int = 17,
-    device_path: Optional[str] = None
+    device_path: Optional[str] = None,
+    arrangement_index: Optional[int] = None
 ) -> str:
     """
     Read back a clip automation envelope, to check its shape after writing it.
@@ -1169,6 +1189,10 @@ def get_clip_envelope(
     - samples:         How many evenly spaced samples to take (2-512, default 17)
     - device_path:     Path from get_device_tree, to reach a device nested inside a
                        rack (a plugin on one drum pad, say); overrides device_index
+    - arrangement_index: Index into the track's Arrangement clips instead of a Session
+                       slot, as listed by get_arrangement_clips; overrides clip_index
+    Session clips only: Live refuses clip envelopes on Arrangement clips, so
+    arrangement_index is rejected here even though the note tools accept it.
     """
     try:
         ableton = get_ableton_connection()
@@ -1181,7 +1205,8 @@ def get_clip_envelope(
             "from_time": from_time,
             "to_time": to_time,
             "samples": samples,
-            "device_path": device_path
+            "device_path": device_path,
+            "arrangement_index": arrangement_index
         })
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -1194,11 +1219,12 @@ def get_clip_envelope(
 def clear_clip_envelope(
     ctx: Context,
     track_index: int,
-    clip_index: int,
+    clip_index: int = 0,
     device_index: int = 0,
     parameter_index: Optional[int] = None,
     parameter_name: Optional[str] = None,
-    device_path: Optional[str] = None
+    device_path: Optional[str] = None,
+    arrangement_index: Optional[int] = None
 ) -> str:
     """
     Remove a clip's automation envelope for one device or mixer parameter.
@@ -1211,6 +1237,10 @@ def clear_clip_envelope(
     - parameter_name:  Name of the parameter to clear
     - device_path:     Path from get_device_tree, to reach a device nested inside a
                        rack (a plugin on one drum pad, say); overrides device_index
+    - arrangement_index: Index into the track's Arrangement clips instead of a Session
+                       slot, as listed by get_arrangement_clips; overrides clip_index
+    Session clips only: Live refuses clip envelopes on Arrangement clips, so
+    arrangement_index is rejected here even though the note tools accept it.
     """
     try:
         ableton = get_ableton_connection()
@@ -1220,7 +1250,8 @@ def clear_clip_envelope(
             "device_index": device_index,
             "parameter_index": parameter_index,
             "parameter_name": parameter_name,
-            "device_path": device_path
+            "device_path": device_path,
+            "arrangement_index": arrangement_index
         })
         return (
             f"Cleared automation for '{result.get('parameter_name')}' "
@@ -1236,11 +1267,12 @@ def clear_clip_envelope(
 def get_clip_notes(
     ctx: Context,
     track_index: int,
-    clip_index: int,
+    clip_index: int = 0,
     from_time: float = 0.0,
     time_span: Optional[float] = None,
     from_pitch: int = 0,
-    pitch_span: int = 128
+    pitch_span: int = 128,
+    arrangement_index: Optional[int] = None
 ) -> str:
     """
     Read the notes already inside a MIDI clip.
@@ -1263,6 +1295,8 @@ def get_clip_notes(
     - time_span:   Length of the range in beats (default: the whole clip)
     - from_pitch:  Lowest MIDI pitch to include (default 0)
     - pitch_span:  How many semitones upward to include (default 128, i.e. everything)
+    - arrangement_index: Index into the track's Arrangement clips instead of a Session
+                       slot, as listed by get_arrangement_clips; overrides clip_index
     """
     try:
         ableton = get_ableton_connection()
@@ -1272,7 +1306,8 @@ def get_clip_notes(
             "from_time": from_time,
             "time_span": time_span,
             "from_pitch": from_pitch,
-            "pitch_span": pitch_span
+            "pitch_span": pitch_span,
+            "arrangement_index": arrangement_index
         })
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -1285,11 +1320,12 @@ def get_clip_notes(
 def remove_clip_notes(
     ctx: Context,
     track_index: int,
-    clip_index: int,
+    clip_index: int = 0,
     from_time: float = 0.0,
     time_span: Optional[float] = None,
     from_pitch: int = 0,
-    pitch_span: int = 128
+    pitch_span: int = 128,
+    arrangement_index: Optional[int] = None
 ) -> str:
     """
     Delete the notes inside a time and pitch window, leaving the clip in place.
@@ -1311,6 +1347,8 @@ def remove_clip_notes(
     - time_span:   Length of the window in beats (default: the whole clip)
     - from_pitch:  Lowest MIDI pitch to clear (default 0)
     - pitch_span:  How many semitones upward to clear (default 128, i.e. all)
+    - arrangement_index: Index into the track's Arrangement clips instead of a Session
+                       slot, as listed by get_arrangement_clips; overrides clip_index
     """
     try:
         ableton = get_ableton_connection()
@@ -1320,7 +1358,8 @@ def remove_clip_notes(
             "from_time": from_time,
             "time_span": time_span,
             "from_pitch": from_pitch,
-            "pitch_span": pitch_span
+            "pitch_span": pitch_span,
+            "arrangement_index": arrangement_index
         })
         return (
             f"Removed {result.get('notes_removed')} note(s) from "
@@ -1336,8 +1375,9 @@ def remove_clip_notes(
 def modify_clip_notes(
     ctx: Context,
     track_index: int,
-    clip_index: int,
-    modifications: List[Dict[str, Any]]
+    modifications: List[Dict[str, Any]],
+    clip_index: int = 0,
+    arrangement_index: Optional[int] = None
 ) -> str:
     """
     Change existing notes in place, without deleting anything.
@@ -1360,13 +1400,16 @@ def modify_clip_notes(
     - track_index:   Index of the track
     - clip_index:    Index of the Session clip slot
     - modifications: List of {note_id, ...fields to change}
+    - arrangement_index: Index into the track's Arrangement clips instead of a Session
+                       slot, as listed by get_arrangement_clips; overrides clip_index
     """
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("modify_clip_notes", {
             "track_index": track_index,
             "clip_index": clip_index,
-            "modifications": modifications
+            "modifications": modifications,
+            "arrangement_index": arrangement_index
         })
         fields = result.get("fields_changed") or []
         return (
