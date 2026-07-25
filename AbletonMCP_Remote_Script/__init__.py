@@ -244,7 +244,7 @@ class AbletonMCP(ControlSurface):
                                  # Note editing - must run on the main thread
                                  "remove_clip_notes", "modify_clip_notes",
                                  # Device chain order – must run on the main thread
-                                 "move_device",
+                                 "move_device", "select_drum_pad",
                                  # Display-value targeting – must run on the main thread
                                  "set_parameter_to_display"]:
                 # Use a thread-safe approach with a response queue
@@ -364,6 +364,11 @@ class AbletonMCP(ControlSurface):
                                 params.get("clip_index", 0))
                         elif command_type == "delete_track":
                             result = self._delete_track(params.get("track_index", 0))
+                        elif command_type == "select_drum_pad":
+                            result = self._select_drum_pad(
+                                params.get("track_index", 0),
+                                params.get("note", 36),
+                                params.get("device_path", None))
                         elif command_type == "move_device":
                             result = self._move_device(
                                 params.get("track_index", 0),
@@ -1201,6 +1206,71 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error building device tree: " + str(e))
             raise
 
+    def _find_drum_rack(self, track_index, device_path):
+        """The drum rack to work on: the one named by device_path, or the first one
+        found anywhere in the track's device tree."""
+        if device_path is not None:
+            node, kind = self._resolve_device_path(track_index, device_path)
+            if kind != "device":
+                raise ValueError("device_path must point at a device, not a chain")
+            return node
+
+        def search(container, depth=0):
+            if depth > 6:
+                return None
+            for device in container.devices:
+                try:
+                    if device.can_have_drum_pads:
+                        return device
+                except Exception:
+                    pass
+                chains = self._chains_of(device)
+                for chain in (chains or []):
+                    found = search(chain, depth + 1)
+                    if found is not None:
+                        return found
+            return None
+
+        rack = search(self._resolve_track(track_index))
+        if rack is None:
+            raise ValueError(
+                "No drum rack on this track. Load one first, or pass device_path.")
+        return rack
+
+    def _select_drum_pad(self, track_index, note, device_path=None):
+        """Point Live's drum rack at one pad.
+
+        The browser loads a sample onto whichever pad is selected, which is the only
+        way to place samples on specific pads: there is no API that loads into a pad
+        directly, and an empty pad has no chain to move a device into."""
+        try:
+            rack = self._find_drum_rack(track_index, device_path)
+            wanted = int(note)
+
+            target = None
+            for pad in rack.drum_pads:
+                if pad.note == wanted:
+                    target = pad
+                    break
+            if target is None:
+                raise IndexError("No drum pad for note " + str(wanted) +
+                                 "; drum racks cover 0-127")
+
+            self._song.view.selected_track = self._resolve_track(track_index)
+            rack.view.selected_drum_pad = target
+
+            return {
+                "success": True,
+                "track_index": track_index,
+                "rack_name": rack.name,
+                "note": wanted,
+                "pad_name": target.name,
+                "devices_on_pad": [d.name for chain in target.chains for d in chain.devices]
+            }
+        except Exception as e:
+            self.log_message("Error selecting drum pad: " + str(e))
+            raise
+
     def _move_device(self, track_index, device_index, to_position, to_track_index,
                      from_path=None, to_path=None):
         """Reorder a device within its chain, or move it onto another track.
@@ -1534,10 +1604,15 @@ class AbletonMCP(ControlSurface):
     # Suffix -> multiplier that puts a displayed magnitude on one scale, so that
     # "2.15 kHz" and "995 Hz" are comparable and "12.3 ms" and "1.20 s" are too.
     # Live switches units mid-range, which is exactly why this is needed.
+    # Order matters: longer suffixes are tested first, so "kHz" is not read as a bare
+    # "k" and "ms" is not read as "m". A bare "k" is not hypothetical - some devices
+    # display a frequency as "22.0k" with no unit at all, and reading that as 22 turns
+    # the whole range upside down.
     DISPLAY_UNIT_SCALE = (
         ("khz", 1000.0), ("hz", 1.0),
         ("ms", 0.001), ("sec", 1.0), ("s", 1.0),
-        ("db", 1.0), ("%", 1.0), ("st", 1.0)
+        ("db", 1.0), ("%", 1.0), ("st", 1.0),
+        ("k", 1000.0)
     )
 
     def _parse_display_number(self, text):
@@ -2369,6 +2444,7 @@ class AbletonMCP(ControlSurface):
         ('sounds',        ('query:sounds', '/sounds/')),
         ('audio_effects', ('query:audio effects', 'audioeffects', '/audio_effects/')),
         ('midi_effects',  ('query:midi effects', 'midieffects', '/midi_effects/')),
+        ('user_folders',  ('userfolder:',)),
     )
 
     def _order_roots_by_uri(self, roots, uri):
@@ -2383,6 +2459,54 @@ class AbletonMCP(ControlSurface):
                 return head + tail
         return roots
 
+    def _find_user_folder_item(self, browser, uri):
+        """Resolve a userfolder: URI directly, without searching.
+
+        These URIs describe their own location: the Place's own URI sits before the
+        '#', and the segments after it are colon separated. Walking instead of
+        descending means crawling every Place in the sidebar - one of which may be a
+        whole drive - and that cost about half a minute per sample load.
+
+        Each level is matched on the child's own URI, built up piece by piece, so no
+        percent-decoding or name comparison is involved."""
+        if not isinstance(uri, str) or not uri.lower().startswith("userfolder:"):
+            return None
+
+        head, separator, tail = uri.partition("#")
+        if not separator:
+            return None
+
+        try:
+            folders = list(getattr(browser, "user_folders", None) or [])
+        except Exception:
+            return None
+
+        node = None
+        for folder in folders:
+            if str(getattr(folder, "uri", "") or "").lower() == head.lower():
+                node = folder
+                break
+        if node is None:
+            return None
+
+        prefix = head + "#"
+        for index, segment in enumerate([x for x in tail.split(":") if x]):
+            prefix = prefix + segment if index == 0 else prefix + ":" + segment
+            wanted = prefix.lower()
+            step = None
+            try:
+                children = node.children
+            except Exception:
+                return None
+            for child in children:
+                if str(getattr(child, "uri", "") or "").lower() == wanted:
+                    step = child
+                    break
+            if step is None:
+                return None
+            node = step
+        return node
+
     def _find_browser_item_by_uri(self, browser_or_item, uri, max_depth=10, current_depth=0):
         """Find a browser item by its URI.
 
@@ -2395,7 +2519,9 @@ class AbletonMCP(ControlSurface):
                 self._uri_cache = cache = {}
             if uri in cache:
                 return cache[uri]
-            result = self._walk_browser_for_uri(browser_or_item, uri, max_depth, 0)
+            result = self._find_user_folder_item(browser_or_item, uri)
+            if result is None:
+                result = self._walk_browser_for_uri(browser_or_item, uri, max_depth, 0)
             if result is not None:
                 cache[uri] = result
             return result
@@ -2427,6 +2553,15 @@ class AbletonMCP(ControlSurface):
                             roots.append((extra_attr, getattr(browser_or_item, extra_attr)))
                         except (AttributeError, RuntimeError) as e:
                             self.log_message("Could not access browser.{0}: {1}".format(extra_attr, str(e)))
+
+                # The folders a user adds to Places are a list rather than a named
+                # attribute, so each one is appended as its own root. Without this the
+                # sidebar is browsable but nothing in it can be loaded by URI.
+                try:
+                    for folder in (getattr(browser_or_item, 'user_folders', None) or []):
+                        roots.append(('user_folders', folder))
+                except Exception as e:
+                    self.log_message("Could not access browser.user_folders: {0}".format(str(e)))
 
                 for _attr, category in self._order_roots_by_uri(roots, uri):
                     item = self._find_browser_item_by_uri(category, uri, max_depth, current_depth + 1)

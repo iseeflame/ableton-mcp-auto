@@ -1622,6 +1622,55 @@ def load_device_into_chain(
 
 
 @mcp.tool()
+@telemetry_tool("load_sample_to_drum_pad")
+def load_sample_to_drum_pad(
+    ctx: Context,
+    track_index: int,
+    note: int,
+    uri: str,
+    device_path: Optional[str] = None
+) -> str:
+    """
+    Put a sample on one pad of a drum rack, building a kit pad by pad.
+
+    Live has no call that loads into a pad directly, and an empty pad has no chain to
+    move a device into, so this does what a person does: select the pad, then load. The
+    two happen as separate commands, because a selection made during one Remote Script
+    turn is not yet visible to code later in that same turn.
+
+    The track needs a Drum Rack on it first — load "query:Drums#Drum%20Rack" if it has
+    none. note is the MIDI note the pad answers to: 36 is C1, the bottom-left pad, and a
+    kit conventionally runs 36 kick, 38 snare, 42 closed hat upward.
+
+    Parameters:
+    - track_index: Index of the track holding the drum rack
+    - note:        MIDI note of the pad to fill (36-51 covers the visible 4x4 grid)
+    - uri:         Browser URI of the sample
+    - device_path: Path to a specific drum rack, when the track has more than one
+    """
+    try:
+        ableton = get_ableton_connection()
+        picked = ableton.send_command("select_drum_pad", {
+            "track_index": track_index, "note": note, "device_path": device_path})
+        load = ableton.send_command("load_browser_item", {
+            "track_index": track_index, "item_uri": uri})
+        if not load.get("loaded", False):
+            return f"Selected pad {note} but failed to load '{uri}'"
+
+        after = ableton.send_command("select_drum_pad", {
+            "track_index": track_index, "note": note, "device_path": device_path})
+        landed = after.get("devices_on_pad") or []
+        return (
+            f"Loaded '{load.get('item_name', uri)}' onto pad {note} of "
+            f"'{picked.get('rack_name')}'; the pad now holds: "
+            f"{', '.join(landed) if landed else '(nothing - the sample did not land)'}"
+        )
+    except Exception as e:
+        logger.error(f"Error loading sample to drum pad: {str(e)}")
+        return f"Error loading sample to drum pad: {str(e)}"
+
+
+@mcp.tool()
 @telemetry_tool("move_device")
 def move_device(
     ctx: Context,

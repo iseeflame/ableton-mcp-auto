@@ -14,7 +14,7 @@ parameters inside clips.
 >
 > 1. **Mixing was added.** Upstream can create tracks, clips and notes and load devices, but
 >    cannot touch a device's parameters, write automation, reach the master or return tracks,
->    or remove anything it has added. This fork adds twenty tools covering that ground
+>    or remove anything it has added. This fork adds twenty-one tools covering that ground
 >    (see [What this fork adds](#what-this-fork-adds)).
 > 2. **Telemetry was removed.** Upstream ships an opt-out telemetry client that reports usage
 >    to the author's Supabase project. This fork removes it entirely
@@ -41,7 +41,7 @@ parameters inside clips.
 
 ## What this fork adds
 
-Twenty tools, plus the matching commands in the Remote Script:
+Twenty-one tools, plus the matching commands in the Remote Script:
 
 | Tool | Purpose |
 | --- | --- |
@@ -61,6 +61,7 @@ Twenty tools, plus the matching commands in the Remote Script:
 | `move_device` | Reorder a device in its chain, or move it into another chain or track |
 | `get_device_tree` | List a track's devices including everything nested inside racks |
 | `load_device_into_chain` | Load a device into one chain of a rack, not onto the track |
+| `load_sample_to_drum_pad` | Put a sample on one pad of a drum rack |
 | `delete_device` | Remove one device from a track's chain |
 | `describe_live_api` | Inspect Live's own API from inside the running application |
 | `delete_clip` | Delete the clip in a Session slot |
@@ -127,6 +128,15 @@ can only append to a track — `load_device_into_chain` loads and then moves, in
 steps, because a device added during one Remote Script turn is not yet visible to code
 later in that same turn.
 
+### Building a drum kit pad by pad
+
+`load_sample_to_drum_pad` selects a pad and then loads, which is what a person does by
+dragging. It only works on a pad that already holds something: an **empty pad has no
+chain**, so there is nothing for a device to be moved into, and Live responds to the load
+by replacing the whole rack with a Simpler. To assemble a kit from scratch, start from a
+factory kit whose pads are populated and swap the samples out — delete the Simpler in the
+pad's chain, then move the new one in, since a chain holds one instrument.
+
 ### Reaching your own sample folders
 
 Upstream resolves a browser path by matching its first segment against a *named attribute*
@@ -135,8 +145,15 @@ sidebar are not attributes; they sit in a list, so a folder called `Scale` had n
 match and was invisible.
 
 `get_browser_items_at_path("places")` now lists those folders, and
-`"places/<folder>/..."` descends into one like any other path. Your own sample libraries
-and preset collections are reachable the same way as Live's factory content.
+`"places/<folder>/..."` descends into one like any other path. Loading works too: the URI
+resolver searches user folders as well, which it previously did not, so a Place could be
+browsed but nothing in it could actually be loaded.
+
+A `userfolder:` URI describes its own location — the Place's URI before the `#`, then
+colon-separated segments — so it is resolved by descending that path rather than by
+searching. Searching meant crawling every folder in the sidebar, and if one of them is a
+whole drive a single sample load took roughly half a minute; descending brings it under
+a second.
 
 ### Asking Live what it can do
 
