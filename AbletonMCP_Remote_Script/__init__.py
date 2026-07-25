@@ -3,6 +3,7 @@ from __future__ import absolute_import, print_function, unicode_literals
 
 from _Framework.ControlSurface import ControlSurface
 import os
+import re
 import socket
 import json
 import threading
@@ -233,7 +234,14 @@ class AbletonMCP(ControlSurface):
                                  "start_playback", "stop_playback", "load_browser_item",
                                  # Arrangement view – must run on the main thread
                                  "switch_to_arrangement_view", "set_current_song_time",
-                                 "duplicate_session_clip_to_arrangement"]:
+                                 "duplicate_session_clip_to_arrangement",
+                                 # Device parameters / automation – must run on the main thread
+                                 "set_device_parameter", "set_mixer_parameter",
+                                 "set_clip_envelope", "clear_clip_envelope",
+                                 # Deletion – must run on the main thread
+                                 "delete_clip", "delete_track", "delete_device",
+                                 # Display-value targeting – must run on the main thread
+                                 "set_parameter_to_display"]:
                 # Use a thread-safe approach with a response queue
                 response_queue = queue.Queue()
                 
@@ -303,6 +311,57 @@ class AbletonMCP(ControlSurface):
                             destination_time = params.get("destination_time", 0.0)
                             result = self._duplicate_session_clip_to_arrangement(
                                 track_index, clip_index, destination_time)
+                        # ── Device parameters / automation ─────────────────────────
+                        elif command_type == "set_device_parameter":
+                            result = self._set_device_parameter(
+                                params.get("track_index", 0),
+                                params.get("device_index", 0),
+                                params.get("parameter_index", None),
+                                params.get("parameter_name", None),
+                                params.get("value", None))
+                        elif command_type == "set_mixer_parameter":
+                            result = self._set_device_parameter(
+                                params.get("track_index", 0),
+                                -1,
+                                None,
+                                params.get("parameter_name", "volume"),
+                                params.get("value", None))
+                        elif command_type == "set_clip_envelope":
+                            result = self._set_clip_envelope(
+                                params.get("track_index", 0),
+                                params.get("clip_index", 0),
+                                params.get("device_index", 0),
+                                params.get("parameter_index", None),
+                                params.get("parameter_name", None),
+                                params.get("points", []),
+                                params.get("interpolate", False),
+                                params.get("step_size", 0.0625),
+                                params.get("clear_existing", True))
+                        elif command_type == "clear_clip_envelope":
+                            result = self._clear_clip_envelope(
+                                params.get("track_index", 0),
+                                params.get("clip_index", 0),
+                                params.get("device_index", 0),
+                                params.get("parameter_index", None),
+                                params.get("parameter_name", None))
+                        # ── Deletion ────────────────────────────────────────────────
+                        elif command_type == "delete_clip":
+                            result = self._delete_clip(
+                                params.get("track_index", 0),
+                                params.get("clip_index", 0))
+                        elif command_type == "delete_track":
+                            result = self._delete_track(params.get("track_index", 0))
+                        elif command_type == "delete_device":
+                            result = self._delete_device(
+                                params.get("track_index", 0),
+                                params.get("device_index", 0))
+                        elif command_type == "set_parameter_to_display":
+                            result = self._set_parameter_to_display(
+                                params.get("track_index", 0),
+                                params.get("device_index", 0),
+                                params.get("parameter_index", None),
+                                params.get("parameter_name", None),
+                                params.get("target", None))
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -322,7 +381,10 @@ class AbletonMCP(ControlSurface):
                 # create_audio_clip, which decodes/imports the audio file on
                 # the main thread) can take longer than the default 10s on
                 # larger files — give them more headroom.
-                long_running_commands = {"create_audio_clip": 60.0}
+                # Max for Live instruments can take tens of seconds to boot, and the
+                # load reports failure while actually succeeding if we give up early.
+                long_running_commands = {"create_audio_clip": 60.0,
+                                         "load_browser_item": 60.0}
                 queue_timeout = long_running_commands.get(command_type, 10.0)
                 try:
                     task_response = response_queue.get(timeout=queue_timeout)
@@ -356,6 +418,36 @@ class AbletonMCP(ControlSurface):
             elif command_type == "get_arrangement_clips":
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_arrangement_clips(track_index)
+            # Read-only device parameter inspection – no main-thread scheduling required
+            elif command_type == "get_device_parameters":
+                track_index = params.get("track_index", 0)
+                device_index = params.get("device_index", 0)
+                response["result"] = self._get_device_parameters(track_index, device_index)
+            elif command_type == "get_clip_notes":
+                response["result"] = self._get_clip_notes(
+                    params.get("track_index", 0),
+                    params.get("clip_index", 0),
+                    params.get("from_time", 0.0),
+                    params.get("time_span", None),
+                    params.get("from_pitch", 0),
+                    params.get("pitch_span", 128))
+            elif command_type == "convert_display_values":
+                response["result"] = self._convert_display_values(
+                    params.get("track_index", 0),
+                    params.get("device_index", 0),
+                    params.get("parameter_index", None),
+                    params.get("parameter_name", None),
+                    params.get("targets", []))
+            elif command_type == "get_clip_envelope":
+                response["result"] = self._get_clip_envelope(
+                    params.get("track_index", 0),
+                    params.get("clip_index", 0),
+                    params.get("device_index", 0),
+                    params.get("parameter_index", None),
+                    params.get("parameter_name", None),
+                    params.get("from_time", 0.0),
+                    params.get("to_time", None),
+                    params.get("samples", 17))
             else:
                 response["status"] = "error"
                 response["message"] = "Unknown command: " + command_type
@@ -411,14 +503,18 @@ class AbletonMCP(ControlSurface):
     def _get_track_info(self, track_index):
         """Get information about a track"""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
-            
-            track = self._song.tracks[track_index]
-            
+            track = self._resolve_track(track_index)
+
+            # The master and return tracks have no clip slots, and Live signals absent
+            # members by raising rather than omitting them.
+            try:
+                slots = track.clip_slots
+            except Exception:
+                slots = []
+
             # Get clip slots
             clip_slots = []
-            for slot_index, slot in enumerate(track.clip_slots):
+            for slot_index, slot in enumerate(slots):
                 clip_info = None
                 if slot.has_clip:
                     clip = slot.clip
@@ -445,14 +541,28 @@ class AbletonMCP(ControlSurface):
                     "type": self._get_device_type(device)
                 })
             
+            def optional(name):
+                """Read a track attribute that only regular tracks carry."""
+                try:
+                    return getattr(track, name)
+                except Exception:
+                    return None
+
+            kind = "regular"
+            if track_index == -1:
+                kind = "master"
+            elif track_index <= -2:
+                kind = "return"
+
             result = {
                 "index": track_index,
                 "name": track.name,
-                "is_audio_track": track.has_audio_input,
-                "is_midi_track": track.has_midi_input,
-                "mute": track.mute,
-                "solo": track.solo,
-                "arm": track.arm,
+                "kind": kind,
+                "is_audio_track": optional("has_audio_input"),
+                "is_midi_track": optional("has_midi_input"),
+                "mute": optional("mute"),
+                "solo": optional("solo"),
+                "arm": optional("arm"),
                 "volume": track.mixer_device.volume.value,
                 "panning": track.mixer_device.panning.value,
                 "clip_slots": clip_slots,
@@ -486,11 +596,7 @@ class AbletonMCP(ControlSurface):
     def _set_track_name(self, track_index, name):
         """Set the name of a track"""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
-            
-            # Set the name
-            track = self._song.tracks[track_index]
+            track = self._resolve_track(track_index)
             track.name = name
             
             result = {
@@ -836,6 +942,728 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error duplicating clip to arrangement: " + str(e))
             raise
 
+    # ── Deletion implementations ──────────────────────────────────────────────
+
+    def _delete_clip(self, track_index, clip_index):
+        """Delete the clip in a Session clip slot"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+            track = self._song.tracks[track_index]
+            if clip_index < 0 or clip_index >= len(track.clip_slots):
+                raise IndexError("Clip index out of range")
+
+            clip_slot = track.clip_slots[clip_index]
+            if not clip_slot.has_clip:
+                raise Exception("No clip in track " + str(track_index) +
+                                ", slot " + str(clip_index))
+
+            # Report what was removed so the deletion is auditable after the fact.
+            clip_name = clip_slot.clip.name
+            clip_slot.delete_clip()
+
+            return {
+                "success": True,
+                "track_index": track_index,
+                "track_name": track.name,
+                "clip_index": clip_index,
+                "deleted_clip_name": clip_name
+            }
+        except Exception as e:
+            self.log_message("Error deleting clip: " + str(e))
+            raise
+
+    def _delete_device(self, track_index, device_index):
+        """Remove one device from a track's chain"""
+        try:
+            if device_index == -1:
+                raise ValueError(
+                    "device_index -1 addresses the mixer, which is part of the track and "
+                    "cannot be deleted. Pass the index of a device in the chain.")
+
+            track = self._resolve_track(track_index)
+            if device_index < 0 or device_index >= len(track.devices):
+                raise IndexError(
+                    "Device index out of range: '" + track.name + "' has " +
+                    str(len(track.devices)) + " device(s)")
+
+            # Report what went, so the deletion can be checked after the fact.
+            device_name = track.devices[device_index].name
+            track.delete_device(device_index)
+
+            return {
+                "success": True,
+                "track_index": track_index,
+                "track_name": track.name,
+                "device_index": device_index,
+                "deleted_device_name": device_name,
+                "remaining_devices": [d.name for d in track.devices]
+            }
+        except Exception as e:
+            self.log_message("Error deleting device: " + str(e))
+            raise
+
+    def _delete_track(self, track_index):
+        """Delete an entire track, with everything on it"""
+        try:
+            if track_index < 0 or track_index >= len(self._song.tracks):
+                raise IndexError("Track index out of range")
+
+            track = self._song.tracks[track_index]
+            track_name = track.name
+            clip_count = len([slot for slot in track.clip_slots if slot.has_clip])
+            device_count = len(track.devices)
+
+            self._song.delete_track(track_index)
+
+            return {
+                "success": True,
+                "track_index": track_index,
+                "deleted_track_name": track_name,
+                "deleted_clips": clip_count,
+                "deleted_devices": device_count,
+                "remaining_tracks": len(self._song.tracks)
+            }
+        except Exception as e:
+            self.log_message("Error deleting track: " + str(e))
+            raise
+
+    # ── Device parameter / automation implementations ─────────────────────────
+
+    # Upper bound on steps written by a single set_clip_envelope call, so a tiny
+    # step_size over a long clip can't lock up the main thread.
+    MAX_ENVELOPE_STEPS = 4000
+
+    def _get_mixer_parameters(self, track):
+        """Ordered (key, DeviceParameter) pairs for a track's mixer device.
+
+        cue_volume and crossfader exist only on the master track, and Live signals that
+        by RAISING on attribute access rather than omitting the attribute - getattr's
+        default would not catch it, so each access needs its own guard."""
+        mixer = track.mixer_device
+        entries = []
+        for attr in ("volume", "panning", "track_activator", "cue_volume", "crossfader"):
+            try:
+                param = getattr(mixer, attr)
+            except Exception:
+                continue
+            if param is not None and hasattr(param, "value"):
+                entries.append((attr, param))
+        try:
+            sends = mixer.sends or []
+        except Exception:
+            sends = []
+        for send_index, send in enumerate(sends):
+            entries.append(("send_" + str(send_index), send))
+        return entries
+
+    def _resolve_track(self, track_index):
+        """Resolve a track index to a track object.
+
+        Live keeps the master and the returns out of song.tracks, so negative indices
+        address them:  -1 = master,  -2 = return A,  -3 = return B, and so on."""
+        if track_index == -1:
+            master = getattr(self._song, "master_track", None)
+            if master is None:
+                raise RuntimeError("This Live set has no master track")
+            return master
+
+        if track_index <= -2:
+            returns = getattr(self._song, "return_tracks", None) or []
+            position = -track_index - 2
+            if position >= len(returns):
+                raise IndexError(
+                    "Return track index " + str(track_index) + " asks for return " +
+                    str(position) + ", but this set has " + str(len(returns)) +
+                    " (use -2 for the first return, -3 for the second)")
+            return returns[position]
+
+        if track_index >= len(self._song.tracks):
+            raise IndexError("Track index out of range")
+        return self._song.tracks[track_index]
+
+    def _get_parameter_entries(self, track_index, device_index):
+        """Resolve a track+device to (entries, owner_name, class_name).
+        track_index == -1 addresses the master track, device_index == -1 the mixer."""
+        track = self._resolve_track(track_index)
+
+        if device_index == -1:
+            return self._get_mixer_parameters(track), "Mixer", "MixerDevice"
+
+        if device_index < 0 or device_index >= len(track.devices):
+            raise IndexError("Device index out of range")
+        device = track.devices[device_index]
+        entries = [(param.name, param) for param in device.parameters]
+        return entries, device.name, device.class_name
+
+    def _resolve_parameter(self, track_index, device_index, parameter_index, parameter_name):
+        """Look up a single DeviceParameter by index or by (case-insensitive) name."""
+        entries, owner_name, _ = self._get_parameter_entries(track_index, device_index)
+
+        if parameter_index is not None:
+            if parameter_index < 0 or parameter_index >= len(entries):
+                raise IndexError("Parameter index out of range ('" + owner_name +
+                                 "' has " + str(len(entries)) + " parameters)")
+            return entries[parameter_index][1], owner_name, parameter_index
+
+        if parameter_name:
+            wanted = str(parameter_name).strip().lower()
+            matches = [(index, param) for index, (key, param) in enumerate(entries)
+                       if key.lower() == wanted or param.name.lower() == wanted]
+            # Max for Live devices routinely reuse names - Bengal has seven "Attack"
+            # parameters. Silently taking the first would edit an arbitrary one.
+            if len(matches) > 1:
+                raise ValueError(
+                    "'" + str(parameter_name) + "' is ambiguous on '" + owner_name +
+                    "': it matches " + str(len(matches)) + " parameters, at indices " +
+                    ", ".join([str(i) for i, _ in matches[:12]]) +
+                    ". Pass parameter_index instead.")
+            if matches:
+                return matches[0][1], owner_name, matches[0][0]
+            available = ", ".join([key for key, _ in entries][:30])
+            raise ValueError("No parameter named '" + str(parameter_name) + "' on '" +
+                             owner_name + "'. Available: " + available)
+
+        raise ValueError("Either parameter_index or parameter_name must be provided")
+
+    def _str_for_value(self, param, value):
+        """param.str_for_value() or None. Live raises its own exception types here,
+        so this catches broadly - it is presentation only."""
+        try:
+            return str(param.str_for_value(value))
+        except Exception:
+            return None
+
+    def _param_info(self, key, param, index):
+        """JSON-safe description of a single DeviceParameter"""
+        info = {
+            "index": index,
+            "name": key,
+            "display_name": param.name,
+            "value": param.value,
+            "min": param.min,
+            "max": param.max,
+            "is_quantized": bool(getattr(param, "is_quantized", False)),
+            "is_enabled": bool(getattr(param, "is_enabled", True))
+        }
+
+        # Many parameters are normalised (0.0-1.0) while displaying real-world units,
+        # so report what the range means as well as its numeric bounds.
+        info["display_value"] = self._str_for_value(param, param.value) or str(param.value)
+        display_min = self._str_for_value(param, param.min)
+        display_max = self._str_for_value(param, param.max)
+        if display_min is not None and display_max is not None:
+            info["display_min"] = display_min
+            info["display_max"] = display_max
+
+        # value_items is a property that RAISES on non-quantized parameters, so it must
+        # be gated on is_quantized - getattr's default only covers AttributeError.
+        if info["is_quantized"]:
+            try:
+                info["value_items"] = [str(item) for item in param.value_items]
+            except Exception:
+                pass
+        return info
+
+    # Suffix -> multiplier that puts a displayed magnitude on one scale, so that
+    # "2.15 kHz" and "995 Hz" are comparable and "12.3 ms" and "1.20 s" are too.
+    # Live switches units mid-range, which is exactly why this is needed.
+    DISPLAY_UNIT_SCALE = (
+        ("khz", 1000.0), ("hz", 1.0),
+        ("ms", 0.001), ("sec", 1.0), ("s", 1.0),
+        ("db", 1.0), ("%", 1.0), ("st", 1.0)
+    )
+
+    def _parse_display_number(self, text):
+        """Magnitude of a Live display string, normalised to its base unit
+        (Hz, seconds, dB, %). None when the display carries no number, which is
+        the case for switch-like parameters showing names such as 'Low Shelf'."""
+        if text is None:
+            return None
+        raw = str(text).strip()
+        lowered = raw.lower()
+        if "inf" in lowered:
+            return -1.0e9 if raw.lstrip().startswith("-") else 1.0e9
+
+        match = re.search(r"-?\d+(?:\.\d+)?", raw)
+        if match is None:
+            return None
+        magnitude = float(match.group(0))
+
+        tail = raw[match.end():].strip().lower()
+        for suffix, scale in self.DISPLAY_UNIT_SCALE:
+            if tail.startswith(suffix):
+                return magnitude * scale
+        return magnitude
+
+    def _display_number_at(self, param, value):
+        return self._parse_display_number(self._str_for_value(param, value))
+
+    def _find_value_for_display(self, param, target, iterations=48):
+        """Binary search the raw value whose displayed magnitude is closest to target.
+
+        str_for_value() evaluates a candidate without assigning it, so the whole search
+        happens without touching the parameter. Direction is detected from the endpoints
+        rather than assumed, since not every parameter's display rises with its value."""
+        # Reject switches on the is_quantized flag rather than by hunting for digits in
+        # the display: option names carry numbers of their own ("High Pass 48dB"), which
+        # reads as a plausible magnitude and sends the search off after nonsense.
+        if getattr(param, "is_quantized", False):
+            options = None
+            try:
+                options = [str(item) for item in param.value_items]
+            except Exception:
+                pass
+            detail = (" Its options are: " + ", ".join(options)) if options else ""
+            raise ValueError(
+                "'" + param.name + "' is a switch-like parameter, so matching it by "
+                "displayed value does not apply. Set it directly with set_device_parameter "
+                "using the option index (" + str(param.min) + " to " + str(param.max) +
+                ")." + detail)
+
+        low, high = param.min, param.max
+        at_low = self._display_number_at(param, low)
+        at_high = self._display_number_at(param, high)
+        if at_low is None or at_high is None:
+            raise ValueError(
+                "'" + param.name + "' does not display a numeric value, so it cannot be "
+                "matched by display. Set it directly with set_device_parameter instead.")
+
+        ascending = at_high >= at_low
+        reachable_low = min(at_low, at_high)
+        reachable_high = max(at_low, at_high)
+        clamped = max(reachable_low, min(reachable_high, float(target)))
+
+        best_value, best_display, best_error = None, None, None
+        for _ in range(iterations):
+            middle = (low + high) / 2.0
+            shown = self._str_for_value(param, middle)
+            got = self._parse_display_number(shown)
+            if got is None:
+                break
+            error = abs(got - clamped)
+            if best_error is None or error < best_error:
+                best_value, best_display, best_error = middle, shown, error
+            if error <= max(abs(clamped) * 0.002, 1e-9):
+                break
+            if (got < clamped) == ascending:
+                low = middle
+            else:
+                high = middle
+
+        if best_value is None:
+            raise RuntimeError(
+                "'" + param.name + "' stopped displaying a comparable number partway "
+                "through the search, so no value could be matched. Set it directly with "
+                "set_device_parameter.")
+        return {
+            "value": best_value,
+            "display_value": best_display,
+            "requested_target": float(target),
+            "matched_target": clamped,
+            "out_of_reach": abs(clamped - float(target)) > max(abs(float(target)) * 0.002, 1e-9),
+            "reachable_range": [reachable_low, reachable_high],
+            "display_min": self._str_for_value(param, param.min),
+            "display_max": self._str_for_value(param, param.max)
+        }
+
+    def _convert_display_values(self, track_index, device_index, parameter_index,
+                                parameter_name, targets):
+        """Resolve displayed magnitudes to raw values without changing anything"""
+        try:
+            param, owner_name, resolved_index = self._resolve_parameter(
+                track_index, device_index, parameter_index, parameter_name)
+            if not isinstance(targets, (list, tuple)):
+                targets = [targets]
+            return {
+                "track_index": track_index,
+                "device_index": device_index,
+                "device_name": owner_name,
+                "parameter_index": resolved_index,
+                "parameter_name": param.name,
+                "min": param.min,
+                "max": param.max,
+                "converted": [self._find_value_for_display(param, t) for t in targets]
+            }
+        except Exception as e:
+            self.log_message("Error converting display values: " + str(e))
+            raise
+
+    def _set_parameter_to_display(self, track_index, device_index, parameter_index,
+                                  parameter_name, target):
+        """Set a parameter by the value it should read on screen, e.g. 2000 for 2 kHz"""
+        try:
+            param, owner_name, resolved_index = self._resolve_parameter(
+                track_index, device_index, parameter_index, parameter_name)
+            if not getattr(param, "is_enabled", True):
+                raise RuntimeError("Parameter '" + param.name + "' on '" + owner_name +
+                                   "' is not currently settable")
+
+            found = self._find_value_for_display(param, target)
+            param.value = self._coerce_value(param, found["value"])
+
+            result = dict(found)
+            result.update({
+                "track_index": track_index,
+                "device_index": device_index,
+                "device_name": owner_name,
+                "parameter_index": resolved_index,
+                "parameter_name": param.name,
+                "value": param.value,
+                "display_value": self._str_for_value(param, param.value)
+            })
+            return result
+        except Exception as e:
+            self.log_message("Error setting parameter by display value: " + str(e))
+            raise
+
+    def _coerce_value(self, param, value):
+        """Validate a value against the parameter's range, rounding quantized ones.
+
+        Out-of-range values are rejected rather than clamped. Most Live parameters are
+        normalised (0.0-1.0) while displaying real-world units, so a caller passing
+        '8000' meaning 8 kHz would otherwise be silently pinned to the maximum and
+        reported as success."""
+        if value is None:
+            raise ValueError("A 'value' must be provided")
+        coerced = float(value)
+        low, high = param.min, param.max
+
+        # Tolerate float noise at the edges; reject anything genuinely outside.
+        epsilon = (high - low) * 1e-6 if high > low else 1e-6
+        if coerced < low - epsilon or coerced > high + epsilon:
+            hint = ""
+            display_min = self._str_for_value(param, low)
+            display_max = self._str_for_value(param, high)
+            if display_min is not None and display_max is not None:
+                hint = " (" + display_min + " to " + display_max + ")"
+            raise ValueError(
+                "Value " + str(value) + " is outside the range of '" + param.name +
+                "', which accepts " + str(low) + " to " + str(high) + hint +
+                ". Call get_device_parameters for the parameter's actual range.")
+
+        coerced = max(low, min(high, coerced))
+        if getattr(param, "is_quantized", False):
+            coerced = float(int(round(coerced)))
+        return coerced
+
+    def _get_device_parameters(self, track_index, device_index):
+        """List every parameter of a device (or the mixer, with device_index -1)"""
+        try:
+            entries, owner_name, class_name = self._get_parameter_entries(track_index, device_index)
+            return {
+                "track_index": track_index,
+                "track_name": self._resolve_track(track_index).name,
+                "device_index": device_index,
+                "device_name": owner_name,
+                "class_name": class_name,
+                "parameters": [self._param_info(key, param, index)
+                               for index, (key, param) in enumerate(entries)]
+            }
+        except Exception as e:
+            self.log_message("Error getting device parameters: " + str(e))
+            raise
+
+    def _set_device_parameter(self, track_index, device_index, parameter_index,
+                              parameter_name, value):
+        """Set a single device (or mixer) parameter to a value"""
+        try:
+            param, owner_name, resolved_index = self._resolve_parameter(
+                track_index, device_index, parameter_index, parameter_name)
+
+            if not getattr(param, "is_enabled", True):
+                raise RuntimeError("Parameter '" + param.name + "' on '" + owner_name +
+                                   "' is not currently settable (it may be driven by a "
+                                   "macro or rack chain)")
+
+            param.value = self._coerce_value(param, value)
+
+            result = {
+                "track_index": track_index,
+                "device_index": device_index,
+                "device_name": owner_name,
+                "parameter_index": resolved_index,
+                "parameter_name": param.name,
+                "value": param.value
+            }
+            try:
+                result["display_value"] = str(param.str_for_value(param.value))
+            except (AttributeError, TypeError, ValueError, RuntimeError):
+                pass
+            return result
+        except Exception as e:
+            self.log_message("Error setting device parameter: " + str(e))
+            raise
+
+    def _get_clip_for_envelope(self, track_index, clip_index):
+        """Fetch the session clip at track_index/clip_index, or raise"""
+        if track_index < 0 or track_index >= len(self._song.tracks):
+            raise IndexError("Track index out of range")
+        track = self._song.tracks[track_index]
+        if clip_index < 0 or clip_index >= len(track.clip_slots):
+            raise IndexError("Clip index out of range")
+        clip_slot = track.clip_slots[clip_index]
+        if not clip_slot.has_clip:
+            raise Exception("No clip in track " + str(track_index) +
+                            ", slot " + str(clip_index))
+        return clip_slot.clip
+
+    def _set_clip_envelope(self, track_index, clip_index, device_index, parameter_index,
+                           parameter_name, points, interpolate, step_size, clear_existing):
+        """Write a clip automation envelope for a device/mixer parameter.
+
+        points is a list of {time, value, length?} breakpoints in beats. Live's API only
+        exposes flat steps (insert_step), so interpolate=True approximates a ramp between
+        consecutive points with a series of step_size-wide steps."""
+        try:
+            param, owner_name, resolved_index = self._resolve_parameter(
+                track_index, device_index, parameter_index, parameter_name)
+            clip = self._get_clip_for_envelope(track_index, clip_index)
+
+            if not points:
+                raise ValueError("'points' must contain at least one {time, value} entry")
+
+            normalised = []
+            for point in points:
+                if "time" not in point or "value" not in point:
+                    raise ValueError("Each point needs both 'time' and 'value'")
+                length = point.get("length")
+                normalised.append({
+                    "time": float(point["time"]),
+                    "value": self._coerce_value(param, point["value"]),
+                    "length": float(length) if length is not None else None
+                })
+            normalised.sort(key=lambda entry: entry["time"])
+
+            size = max(float(step_size), 0.001)
+            clip_end = float(clip.length)
+
+            if clear_existing:
+                clip.clear_envelope(param)
+
+            # A new envelope is born with a breakpoint at time 0 holding the parameter's
+            # value, and insert_step() cannot overwrite it. Assigning param.value here
+            # would not help: the seeded point reflects the value as it stood when this
+            # main-thread turn began, so it only observes writes committed by an earlier
+            # command. Aligning the parameter is therefore the caller's job - the MCP
+            # server does it in its own round trip before calling this.
+            envelope = clip.automation_envelope(param)
+            if envelope is None:
+                envelope = clip.create_automation_envelope(param)
+            if envelope is None:
+                raise RuntimeError("Could not create an automation envelope for '" +
+                                   param.name + "' on '" + owner_name + "'")
+
+            steps_written = 0
+            skipped_past_end = 0
+            for index, point in enumerate(normalised):
+                following = normalised[index + 1] if index + 1 < len(normalised) else None
+
+                # A breakpoint sitting at or past the clip's end would write a step
+                # outside the playable range; the value is unreachable, so skip it.
+                if clip_end > 0 and point["time"] >= clip_end:
+                    skipped_past_end += 1
+                    continue
+
+                if point["length"] is not None:
+                    segment_end = point["time"] + point["length"]
+                elif following is not None:
+                    segment_end = following["time"]
+                else:
+                    segment_end = clip_end
+                if segment_end <= point["time"]:
+                    segment_end = point["time"] + size
+
+                if interpolate and following is not None:
+                    span = segment_end - point["time"]
+                    cursor = point["time"]
+                    while cursor < segment_end - 1e-9:
+                        if steps_written >= self.MAX_ENVELOPE_STEPS:
+                            raise RuntimeError(
+                                "Envelope would exceed " + str(self.MAX_ENVELOPE_STEPS) +
+                                " steps; use a larger step_size or a shorter range")
+                        width = min(size, segment_end - cursor)
+                        fraction = (cursor - point["time"]) / span if span > 0 else 0.0
+                        ramped = point["value"] + (following["value"] - point["value"]) * fraction
+                        envelope.insert_step(cursor, width, self._coerce_value(param, ramped))
+                        steps_written += 1
+                        cursor += size
+                else:
+                    if steps_written >= self.MAX_ENVELOPE_STEPS:
+                        raise RuntimeError(
+                            "Envelope would exceed " + str(self.MAX_ENVELOPE_STEPS) + " steps")
+                    envelope.insert_step(point["time"], segment_end - point["time"], point["value"])
+                    steps_written += 1
+
+            return {
+                "success": True,
+                "track_index": track_index,
+                "clip_index": clip_index,
+                "clip_name": clip.name,
+                "device_index": device_index,
+                "device_name": owner_name,
+                "parameter_index": resolved_index,
+                "parameter_name": param.name,
+                "interpolated": bool(interpolate),
+                "steps_written": steps_written,
+                "points_skipped_past_clip_end": skipped_past_end,
+                "clip_length": clip_end
+            }
+        except Exception as e:
+            self.log_message("Error setting clip envelope: " + str(e))
+            raise
+
+    # Bounds on how finely an envelope may be sampled in one read.
+    MIN_ENVELOPE_SAMPLES = 2
+    MAX_ENVELOPE_SAMPLES = 512
+
+    def _get_clip_notes(self, track_index, clip_index, from_time, time_span,
+                        from_pitch, pitch_span):
+        """Read the notes already inside a MIDI clip.
+
+        Live 11 offers get_notes_extended(), which carries per-note probability and
+        velocity range; the older get_notes() returns plain tuples. Their argument
+        orders differ, so each call site spells them out."""
+        try:
+            clip = self._get_clip_for_envelope(track_index, clip_index)
+            if not getattr(clip, "is_midi_clip", True):
+                raise ValueError("Clip in track " + str(track_index) + ", slot " +
+                                 str(clip_index) + " is an audio clip and has no notes")
+
+            start = float(from_time)
+            span = float(time_span) if time_span is not None else float(clip.length)
+            low_pitch = int(from_pitch)
+            pitch_range = int(pitch_span)
+
+            notes = []
+            source = None
+            if hasattr(clip, "get_notes_extended"):
+                source = "get_notes_extended"
+                for n in clip.get_notes_extended(low_pitch, pitch_range, start, span):
+                    entry = {
+                        "pitch": n.pitch,
+                        "start_time": n.start_time,
+                        "duration": n.duration,
+                        "velocity": n.velocity,
+                        "mute": bool(n.mute)
+                    }
+                    for extra in ("probability", "velocity_deviation", "release_velocity"):
+                        try:
+                            entry[extra] = getattr(n, extra)
+                        except Exception:
+                            pass
+                    notes.append(entry)
+            else:
+                source = "get_notes"
+                for tup in clip.get_notes(start, low_pitch, span, pitch_range):
+                    notes.append({
+                        "pitch": tup[0], "start_time": tup[1], "duration": tup[2],
+                        "velocity": tup[3], "mute": bool(tup[4])
+                    })
+
+            notes.sort(key=lambda entry: (entry["start_time"], entry["pitch"]))
+            return {
+                "track_index": track_index,
+                "clip_index": clip_index,
+                "clip_name": clip.name,
+                "clip_length": float(clip.length),
+                "read_via": source,
+                "from_time": start,
+                "time_span": span,
+                "note_count": len(notes),
+                "notes": notes
+            }
+        except Exception as e:
+            self.log_message("Error reading clip notes: " + str(e))
+            raise
+
+    def _get_clip_envelope(self, track_index, clip_index, device_index, parameter_index,
+                           parameter_name, from_time, to_time, samples):
+        """Sample an existing clip envelope at evenly spaced times.
+
+        Live exposes no way to enumerate an envelope's breakpoints, so the shape is
+        reconstructed by evaluating value_at_time() across the requested range."""
+        try:
+            param, owner_name, resolved_index = self._resolve_parameter(
+                track_index, device_index, parameter_index, parameter_name)
+            clip = self._get_clip_for_envelope(track_index, clip_index)
+
+            result = {
+                "track_index": track_index,
+                "clip_index": clip_index,
+                "clip_name": clip.name,
+                "clip_length": float(clip.length),
+                "device_index": device_index,
+                "device_name": owner_name,
+                "parameter_index": resolved_index,
+                "parameter_name": param.name,
+                "min": param.min,
+                "max": param.max
+            }
+            display_min = self._str_for_value(param, param.min)
+            display_max = self._str_for_value(param, param.max)
+            if display_min is not None and display_max is not None:
+                result["display_min"] = display_min
+                result["display_max"] = display_max
+
+            # automation_envelope() returns None rather than creating one, so this
+            # stays a pure read.
+            envelope = clip.automation_envelope(param)
+            if envelope is None:
+                result["has_envelope"] = False
+                result["samples"] = []
+                return result
+            result["has_envelope"] = True
+
+            start = float(from_time)
+            end = float(to_time) if to_time is not None else float(clip.length)
+            if end < start:
+                start, end = end, start
+
+            count = int(samples)
+            count = max(self.MIN_ENVELOPE_SAMPLES, min(count, self.MAX_ENVELOPE_SAMPLES))
+            span = (end - start) / (count - 1) if count > 1 and end > start else 0.0
+
+            sampled = []
+            for position in range(count):
+                moment = start + span * position
+                value = envelope.value_at_time(moment)
+                entry = {"time": round(moment, 6), "value": value}
+                display = self._str_for_value(param, value)
+                if display is not None:
+                    entry["display_value"] = display
+                sampled.append(entry)
+
+            result["from_time"] = start
+            result["to_time"] = end
+            result["samples"] = sampled
+            return result
+        except Exception as e:
+            self.log_message("Error reading clip envelope: " + str(e))
+            raise
+
+    def _clear_clip_envelope(self, track_index, clip_index, device_index,
+                             parameter_index, parameter_name):
+        """Remove the clip automation envelope for a device/mixer parameter"""
+        try:
+            param, owner_name, resolved_index = self._resolve_parameter(
+                track_index, device_index, parameter_index, parameter_name)
+            clip = self._get_clip_for_envelope(track_index, clip_index)
+            clip.clear_envelope(param)
+            return {
+                "success": True,
+                "track_index": track_index,
+                "clip_index": clip_index,
+                "clip_name": clip.name,
+                "device_index": device_index,
+                "device_name": owner_name,
+                "parameter_index": resolved_index,
+                "parameter_name": param.name
+            }
+        except Exception as e:
+            self.log_message("Error clearing clip envelope: " + str(e))
+            raise
+
     # ── Browser implementations ───────────────────────────────────────────────
 
     def _get_browser_item(self, uri, path):
@@ -927,10 +1755,7 @@ class AbletonMCP(ControlSurface):
     def _load_browser_item(self, track_index, item_uri):
         """Load a browser item onto a track by its URI"""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
-                raise IndexError("Track index out of range")
-            
-            track = self._song.tracks[track_index]
+            track = self._resolve_track(track_index)
             
             # Access the application's browser instance instead of creating a new one
             app = self.application()
