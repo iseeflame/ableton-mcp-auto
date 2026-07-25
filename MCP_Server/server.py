@@ -1209,6 +1209,105 @@ def get_clip_notes(
         return f"Error reading clip notes: {str(e)}"
 
 
+@mcp.tool()
+@telemetry_tool("remove_clip_notes")
+def remove_clip_notes(
+    ctx: Context,
+    track_index: int,
+    clip_index: int,
+    from_time: float = 0.0,
+    time_span: Optional[float] = None,
+    from_pitch: int = 0,
+    pitch_span: int = 128
+) -> str:
+    """
+    Delete the notes inside a time and pitch window, leaving the clip in place.
+
+    This is what makes editing a part safe: the clip survives, so its automation
+    envelopes survive with it. Deleting and recreating a clip to change its notes
+    throws away every envelope written into it.
+
+    The defaults clear the whole clip. Narrow the window to work surgically — one bar
+    is from_time=4, time_span=4; the hi-hats alone are from_pitch=42, pitch_span=1.
+
+    Typical edit: get_clip_notes to see what is there, remove_clip_notes over the part
+    being replaced, then add_notes_to_clip with the new material.
+
+    Parameters:
+    - track_index: Index of the track
+    - clip_index:  Index of the Session clip slot
+    - from_time:   Start of the window in beats (default 0.0)
+    - time_span:   Length of the window in beats (default: the whole clip)
+    - from_pitch:  Lowest MIDI pitch to clear (default 0)
+    - pitch_span:  How many semitones upward to clear (default 128, i.e. all)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("remove_clip_notes", {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "from_time": from_time,
+            "time_span": time_span,
+            "from_pitch": from_pitch,
+            "pitch_span": pitch_span
+        })
+        return (
+            f"Removed {result.get('notes_removed')} note(s) from "
+            f"'{result.get('clip_name')}'; {result.get('notes_remaining')} remain"
+        )
+    except Exception as e:
+        logger.error(f"Error removing clip notes: {str(e)}")
+        return f"Error removing clip notes: {str(e)}"
+
+
+@mcp.tool()
+@rich_telemetry_tool("modify_clip_notes")
+def modify_clip_notes(
+    ctx: Context,
+    track_index: int,
+    clip_index: int,
+    modifications: List[Dict[str, Any]]
+) -> str:
+    """
+    Change existing notes in place, without deleting anything.
+
+    Each entry needs the note_id reported by get_clip_notes, plus whichever of these
+    fields should change: pitch, start_time, duration, velocity, mute, probability,
+    velocity_deviation, release_velocity. Omitted fields keep their current values.
+
+    Values are absolute, not relative, so read the clip first and do the arithmetic:
+    transposing down an octave means sending each note with pitch minus 12.
+
+    Example — quieten one note and move another later:
+      [{"note_id": 3, "velocity": 70},
+       {"note_id": 7, "start_time": 6.5, "duration": 1.5}]
+
+    note_ids belong to the clip's current contents and change when notes are removed
+    and re-added, so re-read before a second round of edits.
+
+    Parameters:
+    - track_index:   Index of the track
+    - clip_index:    Index of the Session clip slot
+    - modifications: List of {note_id, ...fields to change}
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("modify_clip_notes", {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "modifications": modifications
+        })
+        fields = result.get("fields_changed") or []
+        return (
+            f"Modified {result.get('notes_modified')} note(s) in "
+            f"'{result.get('clip_name')}'"
+            + (f" ({', '.join(fields)})" if fields else "")
+        )
+    except Exception as e:
+        logger.error(f"Error modifying clip notes: {str(e)}")
+        return f"Error modifying clip notes: {str(e)}"
+
+
 # Display-value targeting endpoints
 
 

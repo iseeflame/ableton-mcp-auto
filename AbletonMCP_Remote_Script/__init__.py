@@ -240,6 +240,8 @@ class AbletonMCP(ControlSurface):
                                  "set_clip_envelope", "clear_clip_envelope",
                                  # Deletion – must run on the main thread
                                  "delete_clip", "delete_track", "delete_device",
+                                 # Note editing - must run on the main thread
+                                 "remove_clip_notes", "modify_clip_notes",
                                  # Display-value targeting – must run on the main thread
                                  "set_parameter_to_display"]:
                 # Use a thread-safe approach with a response queue
@@ -351,6 +353,19 @@ class AbletonMCP(ControlSurface):
                                 params.get("clip_index", 0))
                         elif command_type == "delete_track":
                             result = self._delete_track(params.get("track_index", 0))
+                        elif command_type == "remove_clip_notes":
+                            result = self._remove_clip_notes(
+                                params.get("track_index", 0),
+                                params.get("clip_index", 0),
+                                params.get("from_time", 0.0),
+                                params.get("time_span", None),
+                                params.get("from_pitch", 0),
+                                params.get("pitch_span", 128))
+                        elif command_type == "modify_clip_notes":
+                            result = self._modify_clip_notes(
+                                params.get("track_index", 0),
+                                params.get("clip_index", 0),
+                                params.get("modifications", []))
                         elif command_type == "delete_device":
                             result = self._delete_device(
                                 params.get("track_index", 0),
@@ -1547,7 +1562,8 @@ class AbletonMCP(ControlSurface):
                         "velocity": n.velocity,
                         "mute": bool(n.mute)
                     }
-                    for extra in ("probability", "velocity_deviation", "release_velocity"):
+                    for extra in ("note_id", "probability", "velocity_deviation",
+                                  "release_velocity"):
                         try:
                             entry[extra] = getattr(n, extra)
                         except Exception:
@@ -1575,6 +1591,136 @@ class AbletonMCP(ControlSurface):
             }
         except Exception as e:
             self.log_message("Error reading clip notes: " + str(e))
+            raise
+
+    # Note properties that can be changed in place. release_velocity and the
+    # probability pair only exist in Live 11+, hence the per-field guard below.
+    EDITABLE_NOTE_FIELDS = ("pitch", "start_time", "duration", "velocity", "mute",
+                            "probability", "velocity_deviation", "release_velocity")
+
+    def _count_notes(self, clip):
+        try:
+            return len(clip.get_notes_extended(0, 128, 0.0, float(clip.length)))
+        except AttributeError:
+            return len(clip.get_notes(0.0, 0, float(clip.length), 128))
+
+    def _remove_clip_notes(self, track_index, clip_index, from_time, time_span,
+                           from_pitch, pitch_span):
+        """Delete the notes inside a time and pitch window, leaving the clip itself -
+        and therefore its automation envelopes - untouched."""
+        try:
+            clip = self._get_clip_for_envelope(track_index, clip_index)
+            if not getattr(clip, "is_midi_clip", True):
+                raise ValueError("Clip in track " + str(track_index) + ", slot " +
+                                 str(clip_index) + " is an audio clip and has no notes")
+
+            start = float(from_time)
+            span = float(time_span) if time_span is not None else float(clip.length)
+            low_pitch = int(from_pitch)
+            pitch_range = int(pitch_span)
+
+            before = self._count_notes(clip)
+            if hasattr(clip, "remove_notes_extended"):
+                clip.remove_notes_extended(low_pitch, pitch_range, start, span)
+            else:
+                clip.remove_notes(start, low_pitch, span, pitch_range)
+            after = self._count_notes(clip)
+
+            return {
+                "success": True,
+                "track_index": track_index,
+                "clip_index": clip_index,
+                "clip_name": clip.name,
+                "from_time": start,
+                "time_span": span,
+                "from_pitch": low_pitch,
+                "pitch_span": pitch_range,
+                "notes_removed": before - after,
+                "notes_remaining": after
+            }
+        except Exception as e:
+            self.log_message("Error removing clip notes: " + str(e))
+            raise
+
+    def _modify_clip_notes(self, track_index, clip_index, modifications):
+        """Change existing notes in place, addressed by the note_id from get_clip_notes.
+
+        apply_note_modifications() wants the note objects Live handed out, so the clip
+        vector is fetched, the requested members are mutated, and the whole vector goes
+        back. Constructing MidiNote objects from scratch is not required."""
+        try:
+            clip = self._get_clip_for_envelope(track_index, clip_index)
+            if not hasattr(clip, "apply_note_modifications"):
+                raise RuntimeError(
+                    "This Live version cannot modify notes in place. Use "
+                    "remove_clip_notes followed by add_notes_to_clip instead.")
+            if not modifications:
+                raise ValueError("'modifications' must contain at least one entry")
+
+            vector = clip.get_notes_extended(0, 128, 0.0, float(clip.length))
+            by_id = {}
+            for note in vector:
+                by_id[note.note_id] = note
+
+            applied, changed_fields, missing = 0, [], []
+            for change in modifications:
+                note_id = change.get("note_id")
+                if note_id is None:
+                    raise ValueError(
+                        "Every modification needs a 'note_id'; read them with get_clip_notes")
+                target = by_id.get(note_id)
+                if target is None:
+                    missing.append(note_id)
+                    continue
+
+                touched = False
+                for field in self.EDITABLE_NOTE_FIELDS:
+                    if field not in change or change[field] is None:
+                        continue
+                    value = change[field]
+                    if field == "pitch":
+                        value = max(0, min(127, int(value)))
+                    elif field == "velocity":
+                        value = max(0.0, min(127.0, float(value)))
+                    elif field == "mute":
+                        value = bool(value)
+                    elif field in ("start_time", "duration"):
+                        value = float(value)
+                        if field == "duration" and value <= 0:
+                            raise ValueError("duration must be greater than 0")
+                    else:
+                        value = float(value)
+                    try:
+                        setattr(target, field, value)
+                    except Exception:
+                        # Older Live builds lack probability and friends; skip rather
+                        # than failing a whole edit over an optional property.
+                        continue
+                    if field not in changed_fields:
+                        changed_fields.append(field)
+                    touched = True
+                if touched:
+                    applied += 1
+
+            if missing:
+                raise ValueError(
+                    "No note with id " + ", ".join([str(m) for m in missing[:8]]) +
+                    " in this clip. note_ids change when notes are removed and re-added, "
+                    "so re-read the clip with get_clip_notes before modifying.")
+
+            clip.apply_note_modifications(vector)
+
+            return {
+                "success": True,
+                "track_index": track_index,
+                "clip_index": clip_index,
+                "clip_name": clip.name,
+                "notes_modified": applied,
+                "fields_changed": changed_fields,
+                "note_count": self._count_notes(clip)
+            }
+        except Exception as e:
+            self.log_message("Error modifying clip notes: " + str(e))
             raise
 
     def _get_clip_envelope(self, track_index, clip_index, device_index, parameter_index,

@@ -14,7 +14,7 @@ parameters inside clips.
 >
 > 1. **Mixing was added.** Upstream can create tracks, clips and notes and load devices, but
 >    cannot touch a device's parameters, write automation, reach the master or return tracks,
->    or remove anything it has added. This fork adds twelve tools covering that ground
+>    or remove anything it has added. This fork adds fourteen tools covering that ground
 >    (see [What this fork adds](#what-this-fork-adds)).
 > 2. **Telemetry was removed.** Upstream ships an opt-out telemetry client that reports usage
 >    to the author's Supabase project. This fork removes it entirely
@@ -28,7 +28,7 @@ parameters inside clips.
 - **Two-way communication**: socket-based server bridging the MCP client and Ableton Live
 - **Track manipulation**: create and modify MIDI and audio tracks
 - **Instrument and effect selection**: load instruments, effects and sounds from Live's browser
-- **Clip creation**: create and edit MIDI clips with notes
+- **Clip creation**: create MIDI clips, and read, edit and delete their notes *(fork)*
 - **Device parameters**: read and set any device parameter, plus track volume/pan/sends *(fork)*
 - **Clip automation**: write, read back and clear clip envelopes, including approximated ramps *(fork)*
 - **Real-unit mixing**: target parameters by what they display — "2 kHz", "-12 dB", "140%" *(fork)*
@@ -39,11 +39,13 @@ parameters inside clips.
 
 ## What this fork adds
 
-Twelve tools, plus the matching commands in the Remote Script:
+Fourteen tools, plus the matching commands in the Remote Script:
 
 | Tool | Purpose |
 | --- | --- |
 | `get_clip_notes` | Read the notes already inside a MIDI clip |
+| `remove_clip_notes` | Delete notes in a time and pitch window, keeping the clip |
+| `modify_clip_notes` | Change existing notes in place, by note_id |
 | `get_device_parameters` | List a device's parameters with current value, range, and display value |
 | `set_device_parameter` | Set a parameter by index or name — turn a knob live |
 | `set_mixer_parameter` | Shorthand for track volume, panning, and sends |
@@ -61,6 +63,25 @@ values reach them: **`-1` is the master**, **`-2` the first return**, `-3` the s
 The master additionally exposes `cue_volume` and `crossfader`. A track's sends appear as
 `send_0`, `send_1`, … on its mixer, one per return track, and can be automated like any other
 parameter.
+
+### Editing notes without losing automation
+
+Upstream can only append notes, so changing a part meant deleting the clip and building
+it again — which throws away every automation envelope written into that clip.
+
+`remove_clip_notes` and `modify_clip_notes` remove that trap. The clip is never
+destroyed, so its envelopes stay put:
+
+- **Replace a section**: `get_clip_notes` to see what is there, `remove_clip_notes` over
+  the window being replaced, then `add_notes_to_clip` with the new material. The window
+  is a time and pitch rectangle, so one bar is `from_time=4, time_span=4` and the hi-hats
+  alone are `from_pitch=42, pitch_span=1`.
+- **Adjust what is already there**: `modify_clip_notes` with the `note_id` values from
+  `get_clip_notes`. Send only the fields that change; the rest are left alone. Values are
+  absolute, so transposing means sending each pitch minus 12.
+
+note_ids describe the clip's current contents and are reissued when notes are removed and
+re-added, so re-read between rounds of edits rather than reusing a stale list.
 
 ### Mixing in real units
 
