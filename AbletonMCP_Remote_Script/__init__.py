@@ -228,7 +228,8 @@ class AbletonMCP(ControlSurface):
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
             # Commands that modify Live's state should be scheduled on the main thread
-            elif command_type in ["create_midi_track", "set_track_name",
+            elif command_type in ["create_midi_track", "create_audio_track",
+                                 "create_return_track", "set_track_name",
                                  "create_clip", "create_audio_clip", "add_notes_to_clip", "set_clip_name",
                                  "set_tempo", "fire_clip", "stop_clip",
                                  "start_playback", "stop_playback", "load_browser_item",
@@ -254,6 +255,11 @@ class AbletonMCP(ControlSurface):
                         if command_type == "create_midi_track":
                             index = params.get("index", -1)
                             result = self._create_midi_track(index)
+                        elif command_type == "create_audio_track":
+                            index = params.get("index", -1)
+                            result = self._create_audio_track(index)
+                        elif command_type == "create_return_track":
+                            result = self._create_return_track()
                         elif command_type == "set_track_name":
                             track_index = params.get("track_index", 0)
                             name = params.get("name", "")
@@ -608,6 +614,45 @@ class AbletonMCP(ControlSurface):
             raise
     
     
+    def _create_audio_track(self, index):
+        """Create a new audio track at the given index (-1 appends)"""
+        try:
+            self._song.create_audio_track(index)
+            new_index = len(self._song.tracks) - 1 if index == -1 else index
+            track = self._song.tracks[new_index]
+            return {
+                "index": new_index,
+                "name": track.name,
+                "is_audio_track": True
+            }
+        except Exception as e:
+            self.log_message("Error creating audio track: " + str(e))
+            raise
+
+    def _create_return_track(self):
+        """Create a new return track. Live appends returns rather than taking an index,
+        and keeps them outside song.tracks, so the negative index for addressing it
+        afterwards is reported back."""
+        try:
+            before = len(getattr(self._song, "return_tracks", None) or [])
+            self._song.create_return_track()
+            returns = getattr(self._song, "return_tracks", None) or []
+            if len(returns) <= before:
+                raise RuntimeError("Live did not add a return track")
+
+            position = len(returns) - 1
+            track = returns[position]
+            return {
+                "return_index": position,
+                "track_index": -(position + 2),
+                "name": track.name,
+                "return_count": len(returns),
+                "send_name": "send_" + str(position)
+            }
+        except Exception as e:
+            self.log_message("Error creating return track: " + str(e))
+            raise
+
     def _set_track_name(self, track_index, name):
         """Set the name of a track"""
         try:
@@ -1019,9 +1064,38 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _delete_track(self, track_index):
-        """Delete an entire track, with everything on it"""
+        """Delete an entire track, with everything on it.
+
+        Accepts the same negative indices as everything else: -2, -3 ... remove return
+        tracks, which Live deletes through a separate call. -1 is the master, which
+        cannot be removed at all."""
         try:
-            if track_index < 0 or track_index >= len(self._song.tracks):
+            if track_index == -1:
+                raise ValueError(
+                    "The master track cannot be deleted; every Live set has exactly one.")
+
+            if track_index <= -2:
+                returns = getattr(self._song, "return_tracks", None) or []
+                position = -track_index - 2
+                if position >= len(returns):
+                    raise IndexError(
+                        "Return track index " + str(track_index) + " asks for return " +
+                        str(position) + ", but this set has " + str(len(returns)))
+                target = returns[position]
+                name = target.name
+                device_count = len(target.devices)
+                self._song.delete_return_track(position)
+                return {
+                    "success": True,
+                    "track_index": track_index,
+                    "deleted_track_name": name,
+                    "deleted_clips": 0,
+                    "deleted_devices": device_count,
+                    "remaining_tracks": len(self._song.tracks),
+                    "remaining_returns": len(getattr(self._song, "return_tracks", None) or [])
+                }
+
+            if track_index >= len(self._song.tracks):
                 raise IndexError("Track index out of range")
 
             track = self._song.tracks[track_index]

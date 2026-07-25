@@ -14,7 +14,7 @@ parameters inside clips.
 >
 > 1. **Mixing was added.** Upstream can create tracks, clips and notes and load devices, but
 >    cannot touch a device's parameters, write automation, reach the master or return tracks,
->    or remove anything it has added. This fork adds fourteen tools covering that ground
+>    or remove anything it has added. This fork adds sixteen tools covering that ground
 >    (see [What this fork adds](#what-this-fork-adds)).
 > 2. **Telemetry was removed.** Upstream ships an opt-out telemetry client that reports usage
 >    to the author's Supabase project. This fork removes it entirely
@@ -26,7 +26,7 @@ parameters inside clips.
 ## Features
 
 - **Two-way communication**: socket-based server bridging the MCP client and Ableton Live
-- **Track manipulation**: create and modify MIDI and audio tracks
+- **Track manipulation**: create MIDI, audio and return tracks; rename and delete them *(fork)*
 - **Instrument and effect selection**: load instruments, effects and sounds from Live's browser
 - **Clip creation**: create MIDI clips, and read, edit and delete their notes *(fork)*
 - **Device parameters**: read and set any device parameter, plus track volume/pan/sends *(fork)*
@@ -39,10 +39,12 @@ parameters inside clips.
 
 ## What this fork adds
 
-Fourteen tools, plus the matching commands in the Remote Script:
+Sixteen tools, plus the matching commands in the Remote Script:
 
 | Tool | Purpose |
 | --- | --- |
+| `create_audio_track` | Create an audio track |
+| `create_return_track` | Create a return track, adding a send to every track |
 | `get_clip_notes` | Read the notes already inside a MIDI clip |
 | `remove_clip_notes` | Delete notes in a time and pitch window, keeping the clip |
 | `modify_clip_notes` | Change existing notes in place, by note_id |
@@ -98,8 +100,9 @@ and an unreachable target returns the nearest value together with the range it a
 Use `convert_display_values` when the numbers are destined for `set_clip_envelope`, whose
 breakpoints need raw values: convert `[200, 8000]` first, then write the sweep.
 
-`delete_device`, `delete_clip` and `delete_track` are destructive but covered by Live's undo. Track indices shift
-down after a deletion, so re-read the session before deleting another by index.
+`delete_device`, `delete_clip` and `delete_track` are destructive but covered by Live's undo. Track indices
+shift down after a deletion, so re-read the session before deleting another by index. `delete_track` also
+removes return tracks through their negative index; the master is refused.
 
 Throughout, **`device_index: -1` addresses the track's mixer device**, so volume and panning are
 automated through the same calls as any plugin parameter.

@@ -323,6 +323,54 @@ def create_midi_track(ctx: Context, index: int = -1) -> str:
 
 
 @mcp.tool()
+@telemetry_tool("create_audio_track")
+def create_audio_track(ctx: Context, index: int = -1) -> str:
+    """
+    Create a new audio track in the Ableton session.
+
+    Audio tracks hold recorded or imported audio rather than MIDI. Use create_midi_track
+    for anything an instrument should play.
+
+    Parameters:
+    - index: Position to insert at (-1 = end of list)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("create_audio_track", {"index": index})
+        return f"Created audio track '{result.get('name')}' at index {result.get('index')}"
+    except Exception as e:
+        logger.error(f"Error creating audio track: {str(e)}")
+        return f"Error creating audio track: {str(e)}"
+
+
+@mcp.tool()
+@telemetry_tool("create_return_track")
+def create_return_track(ctx: Context) -> str:
+    """
+    Create a new return track, for effects fed by sends.
+
+    Live appends returns rather than inserting them, so this takes no position. Adding a
+    return also adds a matching send to every track: the first return is `send_0`, the
+    second `send_1`, and so on — settable through set_mixer_parameter and automatable
+    like any other parameter.
+
+    Returns live outside song.tracks, so the reply gives the negative track_index that
+    addresses the new one: -2 for the first return, -3 for the second.
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("create_return_track")
+        return (
+            f"Created return track '{result.get('name')}'; address it as track_index "
+            f"{result.get('track_index')}, and its send on other tracks is "
+            f"'{result.get('send_name')}'"
+        )
+    except Exception as e:
+        logger.error(f"Error creating return track: {str(e)}")
+        return f"Error creating return track: {str(e)}"
+
+
+@mcp.tool()
 @rich_telemetry_tool("set_track_name")
 def set_track_name(ctx: Context, track_index: int, name: str) -> str:
     """
@@ -1486,8 +1534,11 @@ def delete_track(ctx: Context, track_index: int) -> str:
     undo. Track indices shift down after a deletion, so re-read the session with
     get_session_info before deleting another one by index.
 
+    Return tracks are deleted the same way, through their negative index (-2 for the
+    first return). The master cannot be deleted and is refused.
+
     Parameters:
-    - track_index: Index of the track to delete
+    - track_index: Index of the track to delete; -2, -3 ... remove return tracks
     """
     try:
         ableton = get_ableton_connection()
