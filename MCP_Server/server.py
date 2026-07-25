@@ -897,7 +897,8 @@ def duplicate_to_arrangement(
 def get_device_parameters(
     ctx: Context,
     track_index: int,
-    device_index: int
+    device_index: int = 0,
+    device_path: Optional[str] = None
 ) -> str:
     """
     List every automatable parameter ("knob") of a device, with its current value and range.
@@ -910,12 +911,15 @@ def get_device_parameters(
     - track_index:  Index of the track; -1 is the master track, -2 the first return, -3 the second
     - device_index: Index of the device on that track, or -1 for the track's mixer
                     (volume, panning, sends)
+    - device_path:     Path from get_device_tree, to reach a device nested inside a
+                       rack (a plugin on one drum pad, say); overrides device_index
     """
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("get_device_parameters", {
             "track_index": track_index,
-            "device_index": device_index
+            "device_index": device_index,
+            "device_path": device_path
         })
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -928,10 +932,11 @@ def get_device_parameters(
 def set_device_parameter(
     ctx: Context,
     track_index: int,
-    device_index: int,
     value: float,
+    device_index: int = 0,
     parameter_index: Optional[int] = None,
-    parameter_name: Optional[str] = None
+    parameter_name: Optional[str] = None,
+    device_path: Optional[str] = None
 ) -> str:
     """
     Set a device parameter (turn a knob) to a value, live.
@@ -950,6 +955,8 @@ def set_device_parameter(
     - value:           Target value, in the parameter's own units (see get_device_parameters)
     - parameter_index: Index of the parameter to set
     - parameter_name:  Name of the parameter to set, e.g. "Filter Freq"
+    - device_path:     Path from get_device_tree, to reach a device nested inside a
+                       rack (a plugin on one drum pad, say); overrides device_index
     """
     try:
         ableton = get_ableton_connection()
@@ -958,7 +965,8 @@ def set_device_parameter(
             "device_index": device_index,
             "parameter_index": parameter_index,
             "parameter_name": parameter_name,
-            "value": value
+            "value": value,
+            "device_path": device_path
         })
         shown = result.get("display_value", result.get("value"))
         return (
@@ -1010,13 +1018,14 @@ def set_clip_envelope(
     ctx: Context,
     track_index: int,
     clip_index: int,
-    device_index: int,
     points: List[Dict[str, float]],
+    device_index: int = 0,
     parameter_index: Optional[int] = None,
     parameter_name: Optional[str] = None,
     interpolate: bool = False,
     step_size: float = 0.0625,
-    clear_existing: bool = True
+    clear_existing: bool = True,
+    device_path: Optional[str] = None
 ) -> str:
     """
     Write a clip automation envelope for a device or mixer parameter.
@@ -1046,6 +1055,8 @@ def set_clip_envelope(
     - step_size:       Width in beats of each generated step when interpolating
                        (default 0.0625 = 1/16 note)
     - clear_existing:  Clear any existing envelope for this parameter first
+    - device_path:     Path from get_device_tree, to reach a device nested inside a
+                       rack (a plugin on one drum pad, say); overrides device_index
     """
     try:
         ableton = get_ableton_connection()
@@ -1095,7 +1106,8 @@ def set_clip_envelope(
                 "points": points,
                 "interpolate": interpolate,
                 "step_size": step_size,
-                "clear_existing": clear_existing
+                "clear_existing": clear_existing,
+                "device_path": device_path
             })
         finally:
             # The breakpoint is fixed once the steps exist, so the knob can go back.
@@ -1128,12 +1140,13 @@ def get_clip_envelope(
     ctx: Context,
     track_index: int,
     clip_index: int,
-    device_index: int,
+    device_index: int = 0,
     parameter_index: Optional[int] = None,
     parameter_name: Optional[str] = None,
     from_time: float = 0.0,
     to_time: Optional[float] = None,
-    samples: int = 17
+    samples: int = 17,
+    device_path: Optional[str] = None
 ) -> str:
     """
     Read back a clip automation envelope, to check its shape after writing it.
@@ -1154,6 +1167,8 @@ def get_clip_envelope(
     - from_time:       Start of the sampled range in beats (default 0.0)
     - to_time:         End of the sampled range in beats (default: end of the clip)
     - samples:         How many evenly spaced samples to take (2-512, default 17)
+    - device_path:     Path from get_device_tree, to reach a device nested inside a
+                       rack (a plugin on one drum pad, say); overrides device_index
     """
     try:
         ableton = get_ableton_connection()
@@ -1165,7 +1180,8 @@ def get_clip_envelope(
             "parameter_name": parameter_name,
             "from_time": from_time,
             "to_time": to_time,
-            "samples": samples
+            "samples": samples,
+            "device_path": device_path
         })
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -1179,9 +1195,10 @@ def clear_clip_envelope(
     ctx: Context,
     track_index: int,
     clip_index: int,
-    device_index: int,
+    device_index: int = 0,
     parameter_index: Optional[int] = None,
-    parameter_name: Optional[str] = None
+    parameter_name: Optional[str] = None,
+    device_path: Optional[str] = None
 ) -> str:
     """
     Remove a clip's automation envelope for one device or mixer parameter.
@@ -1192,6 +1209,8 @@ def clear_clip_envelope(
     - device_index:    Index of the device, or -1 for the track's mixer
     - parameter_index: Index of the parameter to clear
     - parameter_name:  Name of the parameter to clear
+    - device_path:     Path from get_device_tree, to reach a device nested inside a
+                       rack (a plugin on one drum pad, say); overrides device_index
     """
     try:
         ableton = get_ableton_connection()
@@ -1200,7 +1219,8 @@ def clear_clip_envelope(
             "clip_index": clip_index,
             "device_index": device_index,
             "parameter_index": parameter_index,
-            "parameter_name": parameter_name
+            "parameter_name": parameter_name,
+            "device_path": device_path
         })
         return (
             f"Cleared automation for '{result.get('parameter_name')}' "
@@ -1367,10 +1387,11 @@ def modify_clip_notes(
 def set_parameter_to_display(
     ctx: Context,
     track_index: int,
-    device_index: int,
     target: float,
+    device_index: int = 0,
     parameter_index: Optional[int] = None,
-    parameter_name: Optional[str] = None
+    parameter_name: Optional[str] = None,
+    device_path: Optional[str] = None
 ) -> str:
     """
     Set a parameter by the value it should READ ON SCREEN, in real-world units.
@@ -1395,6 +1416,8 @@ def set_parameter_to_display(
     - target:          Desired on-screen magnitude, in the base unit described above
     - parameter_index: Index of the parameter to set
     - parameter_name:  Name of the parameter to set
+    - device_path:     Path from get_device_tree, to reach a device nested inside a
+                       rack (a plugin on one drum pad, say); overrides device_index
     """
     try:
         ableton = get_ableton_connection()
@@ -1403,7 +1426,8 @@ def set_parameter_to_display(
             "device_index": device_index,
             "parameter_index": parameter_index,
             "parameter_name": parameter_name,
-            "target": target
+            "target": target,
+            "device_path": device_path
         })
         message = (
             f"Set '{result.get('parameter_name')}' on '{result.get('device_name')}' "
@@ -1425,10 +1449,11 @@ def set_parameter_to_display(
 def convert_display_values(
     ctx: Context,
     track_index: int,
-    device_index: int,
     targets: List[float],
+    device_index: int = 0,
     parameter_index: Optional[int] = None,
-    parameter_name: Optional[str] = None
+    parameter_name: Optional[str] = None,
+    device_path: Optional[str] = None
 ) -> str:
     """
     Translate on-screen magnitudes into the raw values a parameter expects, changing nothing.
@@ -1446,6 +1471,8 @@ def convert_display_values(
     - targets:         On-screen magnitudes to convert, e.g. [200, 8000]
     - parameter_index: Index of the parameter
     - parameter_name:  Name of the parameter
+    - device_path:     Path from get_device_tree, to reach a device nested inside a
+                       rack (a plugin on one drum pad, say); overrides device_index
     """
     try:
         ableton = get_ableton_connection()
@@ -1454,7 +1481,8 @@ def convert_display_values(
             "device_index": device_index,
             "parameter_index": parameter_index,
             "parameter_name": parameter_name,
-            "targets": targets
+            "targets": targets,
+            "device_path": device_path
         })
         return json.dumps(result, indent=2)
     except Exception as e:
@@ -1495,13 +1523,114 @@ def delete_clip(ctx: Context, track_index: int, clip_index: int) -> str:
 
 
 @mcp.tool()
+@telemetry_tool("get_device_tree")
+def get_device_tree(ctx: Context, track_index: int, max_depth: int = 4) -> str:
+    """
+    Show a track's devices including everything nested inside racks.
+
+    get_track_info only lists the top level, which is not where the interesting parts of
+    a drum kit live: a factory kit is typically an Instrument Rack holding a Drum Rack
+    whose every pad is a chain with its own devices. This walks that structure.
+
+    Every node reports the `path` that addresses it. Indices alternate between devices
+    and chains: "0" is the first device on the track, "0.0" its first chain, "0.0.1" the
+    second device inside that chain. An odd number of segments always names a device, an
+    even number a chain.
+
+    Chains belonging to drum pads also report the `note` that triggers them and the pad
+    name, so a snare can be found by its MIDI note rather than by counting.
+
+    Parameters:
+    - track_index: Index of the track
+    - max_depth:   How many levels to walk (1-8, default 4)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_device_tree", {
+            "track_index": track_index,
+            "max_depth": max_depth
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error building device tree: {str(e)}")
+        return f"Error building device tree: {str(e)}"
+
+
+@mcp.tool()
+@telemetry_tool("load_device_into_chain")
+def load_device_into_chain(
+    ctx: Context,
+    track_index: int,
+    chain_path: str,
+    uri: str,
+    position: Optional[int] = None
+) -> str:
+    """
+    Load a device from the browser into a chain inside a rack, rather than onto the track.
+
+    This is how one pad of a drum kit gets its own processing: a reverb loaded onto the
+    track would wash the whole kit, while the same reverb inside the snare pad's chain
+    touches only the snare. Use get_device_tree to find the chain path.
+
+    Live's browser can only append to a track, so this loads the device and then moves it
+    into the chain — in separate steps, because a device added during one Remote Script
+    turn is not yet visible to code later in that same turn.
+
+    Parameters:
+    - track_index: Index of the track holding the rack
+    - chain_path:  Path of the destination chain, e.g. "0.0.0.5" (even number of segments)
+    - uri:         Browser URI of the device to load
+    - position:    Slot within the chain; defaults to the end
+    """
+    try:
+        ableton = get_ableton_connection()
+
+        def top_level_devices():
+            info = ableton.send_command("get_track_info", {"track_index": track_index})
+            return [d["name"] for d in info.get("devices", [])]
+
+        before = top_level_devices()
+        load = ableton.send_command("load_browser_item", {
+            "track_index": track_index, "item_uri": uri})
+        if not load.get("loaded", False):
+            return f"Failed to load '{uri}'"
+
+        after = top_level_devices()
+        if len(after) <= len(before):
+            return (
+                f"Loaded '{load.get('item_name', uri)}' but it did not appear at the top "
+                f"level of the track, so there is nothing to move into {chain_path}. "
+                f"Live may have replaced a selected device instead of appending."
+            )
+        landed_at = len(after) - 1
+
+        moved = ableton.send_command("move_device", {
+            "track_index": track_index,
+            "device_index": landed_at,
+            "to_position": position if position is not None else 0,
+            "to_path": chain_path
+        })
+        chain = moved.get("to_name")
+        return (
+            f"Loaded '{moved.get('device_name')}' into chain '{chain}' at {chain_path}, "
+            f"position {moved.get('final_position')}. Chain is now: "
+            f"{' > '.join(moved.get('chain') or [])}"
+        )
+    except Exception as e:
+        logger.error(f"Error loading device into chain: {str(e)}")
+        return f"Error loading device into chain: {str(e)}"
+
+
+@mcp.tool()
 @telemetry_tool("move_device")
 def move_device(
     ctx: Context,
     track_index: int,
-    device_index: int,
-    to_position: int,
-    to_track_index: Optional[int] = None
+    device_index: int = 0,
+    to_position: int = 0,
+    to_track_index: Optional[int] = None,
+    from_path: Optional[str] = None,
+    to_path: Optional[str] = None
 ) -> str:
     """
     Reorder a device within its chain, or move it onto another track.
@@ -1519,10 +1648,18 @@ def move_device(
     instrument — are rejected outright rather than quietly relocated.
 
     Parameters:
+    Devices nested inside racks are reachable through paths from get_device_tree: pass
+    from_path to move a device out of a chain, and to_path to move one in. A chain path
+    has an even number of segments, so "0.0.0.5" is the sixth chain of a rack nested two
+    levels down.
+
+    Parameters:
     - track_index:    Index of the track the device is on now
-    - device_index:   Index of the device in that track's chain
+    - device_index:   Index of the device in that track's chain (ignored if from_path is set)
     - to_position:    Target slot: 0 is first, len(devices) is last
-    - to_track_index: Move to a different track instead; omit to reorder in place
+    - to_track_index: Move to a different track instead; omit to stay on this one
+    - from_path:      Path of the device to move, when it lives inside a rack
+    - to_path:        Path of the destination chain, when the target is inside a rack
     """
     try:
         ableton = get_ableton_connection()
@@ -1530,12 +1667,14 @@ def move_device(
             "track_index": track_index,
             "device_index": device_index,
             "to_position": to_position,
-            "to_track_index": to_track_index
+            "to_track_index": to_track_index,
+            "from_path": from_path,
+            "to_path": to_path
         })
         chain = result.get("chain") or []
         message = (
             f"Moved '{result.get('device_name')}' to position "
-            f"{result.get('final_position')} on '{result.get('to_track_name')}'. "
+            f"{result.get('final_position')} in '{result.get('to_name')}'. "
             f"Chain is now: {' > '.join(chain)}"
         )
         if result.get("adjusted"):
@@ -1594,7 +1733,12 @@ def describe_live_api(
 
 @mcp.tool()
 @telemetry_tool("delete_device")
-def delete_device(ctx: Context, track_index: int, device_index: int) -> str:
+def delete_device(
+    ctx: Context,
+    track_index: int,
+    device_index: int = 0,
+    device_path: Optional[str] = None
+) -> str:
     """
     Remove one device from a track's chain.
 
@@ -1607,12 +1751,15 @@ def delete_device(ctx: Context, track_index: int, device_index: int) -> str:
     - device_index: Index of the device in the chain (get_track_info lists them).
                     -1 is not accepted here: it means "mixer" elsewhere, and the mixer
                     is part of the track rather than a removable device.
+    - device_path:  Path from get_device_tree, to delete a device nested inside a rack;
+                    takes precedence over device_index
     """
     try:
         ableton = get_ableton_connection()
         result = ableton.send_command("delete_device", {
             "track_index": track_index,
-            "device_index": device_index
+            "device_index": device_index,
+            "device_path": device_path
         })
         remaining = result.get("remaining_devices") or []
         return (

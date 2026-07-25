@@ -328,7 +328,8 @@ class AbletonMCP(ControlSurface):
                                 params.get("device_index", 0),
                                 params.get("parameter_index", None),
                                 params.get("parameter_name", None),
-                                params.get("value", None))
+                                params.get("value", None),
+                                params.get("device_path", None))
                         elif command_type == "set_mixer_parameter":
                             result = self._set_device_parameter(
                                 params.get("track_index", 0),
@@ -346,14 +347,16 @@ class AbletonMCP(ControlSurface):
                                 params.get("points", []),
                                 params.get("interpolate", False),
                                 params.get("step_size", 0.0625),
-                                params.get("clear_existing", True))
+                                params.get("clear_existing", True),
+                                params.get("device_path", None))
                         elif command_type == "clear_clip_envelope":
                             result = self._clear_clip_envelope(
                                 params.get("track_index", 0),
                                 params.get("clip_index", 0),
                                 params.get("device_index", 0),
                                 params.get("parameter_index", None),
-                                params.get("parameter_name", None))
+                                params.get("parameter_name", None),
+                                params.get("device_path", None))
                         # ── Deletion ────────────────────────────────────────────────
                         elif command_type == "delete_clip":
                             result = self._delete_clip(
@@ -366,7 +369,9 @@ class AbletonMCP(ControlSurface):
                                 params.get("track_index", 0),
                                 params.get("device_index", 0),
                                 params.get("to_position", 0),
-                                params.get("to_track_index", None))
+                                params.get("to_track_index", None),
+                                params.get("from_path", None),
+                                params.get("to_path", None))
                         elif command_type == "remove_clip_notes":
                             result = self._remove_clip_notes(
                                 params.get("track_index", 0),
@@ -383,14 +388,16 @@ class AbletonMCP(ControlSurface):
                         elif command_type == "delete_device":
                             result = self._delete_device(
                                 params.get("track_index", 0),
-                                params.get("device_index", 0))
+                                params.get("device_index", 0),
+                                params.get("device_path", None))
                         elif command_type == "set_parameter_to_display":
                             result = self._set_parameter_to_display(
                                 params.get("track_index", 0),
                                 params.get("device_index", 0),
                                 params.get("parameter_index", None),
                                 params.get("parameter_name", None),
-                                params.get("target", None))
+                                params.get("target", None),
+                                params.get("device_path", None))
 
                         # Put the result in the queue
                         response_queue.put({"status": "success", "result": result})
@@ -449,9 +456,10 @@ class AbletonMCP(ControlSurface):
                 response["result"] = self._get_arrangement_clips(track_index)
             # Read-only device parameter inspection – no main-thread scheduling required
             elif command_type == "get_device_parameters":
-                track_index = params.get("track_index", 0)
-                device_index = params.get("device_index", 0)
-                response["result"] = self._get_device_parameters(track_index, device_index)
+                response["result"] = self._get_device_parameters(
+                    params.get("track_index", 0),
+                    params.get("device_index", 0),
+                    params.get("device_path", None))
             elif command_type == "get_clip_notes":
                 response["result"] = self._get_clip_notes(
                     params.get("track_index", 0),
@@ -460,6 +468,10 @@ class AbletonMCP(ControlSurface):
                     params.get("time_span", None),
                     params.get("from_pitch", 0),
                     params.get("pitch_span", 128))
+            elif command_type == "get_device_tree":
+                response["result"] = self._get_device_tree(
+                    params.get("track_index", 0),
+                    params.get("max_depth", 4))
             elif command_type == "describe_live_api":
                 response["result"] = self._describe_live_api(
                     params.get("path", ""),
@@ -471,7 +483,8 @@ class AbletonMCP(ControlSurface):
                     params.get("device_index", 0),
                     params.get("parameter_index", None),
                     params.get("parameter_name", None),
-                    params.get("targets", []))
+                    params.get("targets", []),
+                    params.get("device_path", None))
             elif command_type == "get_clip_envelope":
                 response["result"] = self._get_clip_envelope(
                     params.get("track_index", 0),
@@ -481,7 +494,8 @@ class AbletonMCP(ControlSurface):
                     params.get("parameter_name", None),
                     params.get("from_time", 0.0),
                     params.get("to_time", None),
-                    params.get("samples", 17))
+                    params.get("samples", 17),
+                    params.get("device_path", None))
             else:
                 response["status"] = "error"
                 response["message"] = "Unknown command: " + command_type
@@ -1046,7 +1060,149 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error deleting clip: " + str(e))
             raise
 
-    def _move_device(self, track_index, device_index, to_position, to_track_index):
+    def _chains_of(self, device):
+        """A rack's chains, or None. Live raises on .chains for plain devices."""
+        try:
+            chains = device.chains
+        except Exception:
+            return None
+        return chains
+
+    def _resolve_device_path(self, track_index, path):
+        """Resolve a dotted path into a device or a chain inside a rack.
+
+        Indices alternate: the first is a device on the track, the next a chain inside
+        that device, the next a device inside that chain, and so on. An odd number of
+        segments therefore always lands on a device, an even number on a chain."""
+        track = self._resolve_track(track_index)
+        segments = [seg for seg in str(path).split(".") if seg != ""]
+        if not segments:
+            raise ValueError("A device path needs at least one index, e.g. '0' or '0.0.1'")
+
+        node, kind, walked = track, "track", []
+        for segment in segments:
+            try:
+                index = int(segment)
+            except ValueError:
+                raise ValueError("Device path segments must be numbers, got '" + segment + "'")
+            walked.append(segment)
+            here = ".".join(walked)
+
+            if kind in ("track", "chain"):
+                devices = node.devices
+                if index < 0 or index >= len(devices):
+                    raise IndexError("No device " + str(index) + " at '" + here +
+                                     "'; there are " + str(len(devices)))
+                node, kind = devices[index], "device"
+            else:
+                chains = self._chains_of(node)
+                if chains is None:
+                    raise ValueError("'" + node.name + "' is not a rack, so it has no "
+                                     "chains to descend into at '" + here + "'")
+                if index < 0 or index >= len(chains):
+                    raise IndexError("No chain " + str(index) + " at '" + here +
+                                     "'; there are " + str(len(chains)))
+                node, kind = chains[index], "chain"
+        return node, kind
+
+    def _describe_chain_notes(self, device):
+        """Map a drum rack's chains, by index, to the pad note that triggers them.
+
+        Live hands out a fresh Python wrapper on every attribute access, so id() is
+        meaningless here and recycled addresses quietly produce a plausible but wrong
+        mapping. Chains are compared with == instead, and if that yields nothing the
+        result falls back to pad order - marked as inferred, so a guess is never
+        mistaken for a fact."""
+        mapping = {}
+        try:
+            pads = list(device.drum_pads)
+            chains = list(device.chains)
+        except Exception:
+            return mapping
+        if not chains:
+            return mapping
+
+        filled = []
+        for pad in pads:
+            try:
+                pad_chains = list(pad.chains)
+            except Exception:
+                continue
+            if not pad_chains:
+                continue
+            filled.append((pad, pad_chains))
+
+        for pad, pad_chains in filled:
+            for pad_chain in pad_chains:
+                for index, chain in enumerate(chains):
+                    if index in mapping:
+                        continue
+                    try:
+                        same = bool(chain == pad_chain)
+                    except Exception:
+                        same = False
+                    if same:
+                        mapping[index] = {"note": pad.note, "pad_name": pad.name,
+                                          "note_source": "matched"}
+                        break
+
+        if not mapping and len(filled) == len(chains):
+            # Live lists a drum rack's chains in pad order, so position lines them up
+            # when the objects refuse to compare.
+            for index, (pad, _) in enumerate(sorted(filled, key=lambda item: item[0].note)):
+                mapping[index] = {"note": pad.note, "pad_name": pad.name,
+                                  "note_source": "inferred_by_order"}
+        return mapping
+
+    def _get_device_tree(self, track_index, max_depth):
+        """Walk devices, their chains, and the devices inside those chains.
+
+        Every node carries the path that addresses it, so a nested device or chain can
+        be named in later calls without counting indices by hand."""
+        try:
+            track = self._resolve_track(track_index)
+            depth_limit = max(1, min(int(max_depth), 8))
+
+            def walk_devices(container, prefix, depth):
+                out = []
+                for index, device in enumerate(container.devices):
+                    path = (prefix + "." if prefix else "") + str(index)
+                    entry = {
+                        "path": path,
+                        "name": device.name,
+                        "class_name": device.class_name,
+                        "type": self._get_device_type(device)
+                    }
+                    chains = self._chains_of(device) if depth < depth_limit else None
+                    if chains is not None and len(chains):
+                        notes = self._describe_chain_notes(device)
+                        entry["chains"] = []
+                        for chain_index, chain in enumerate(chains):
+                            chain_path = path + "." + str(chain_index)
+                            chain_entry = {
+                                "path": chain_path,
+                                "name": chain.name,
+                                "device_count": len(chain.devices)
+                            }
+                            chain_entry.update(notes.get(chain_index, {}))
+                            if depth + 1 < depth_limit:
+                                chain_entry["devices"] = walk_devices(
+                                    chain, chain_path, depth + 2)
+                            entry["chains"].append(chain_entry)
+                    out.append(entry)
+                return out
+
+            return {
+                "track_index": track_index,
+                "track_name": track.name,
+                "devices": walk_devices(track, "", 1)
+            }
+        except Exception as e:
+            self.log_message("Error building device tree: " + str(e))
+            raise
+
+    def _move_device(self, track_index, device_index, to_position, to_track_index,
+                     from_path=None, to_path=None):
         """Reorder a device within its chain, or move it onto another track.
 
         Position 0 puts it before everything, len(devices) at the end. Live silently
@@ -1055,14 +1211,29 @@ class AbletonMCP(ControlSurface):
         rather than passed off as success."""
         try:
             source = self._resolve_track(track_index)
-            if device_index < 0 or device_index >= len(source.devices):
-                raise IndexError(
-                    "Device index out of range: '" + source.name + "' has " +
-                    str(len(source.devices)) + " device(s)")
-            device = source.devices[device_index]
+            if from_path is not None:
+                device, kind = self._resolve_device_path(track_index, from_path)
+                if kind != "device":
+                    raise ValueError("from_path must point at a device, not a chain")
+            else:
+                if device_index < 0 or device_index >= len(source.devices):
+                    raise IndexError(
+                        "Device index out of range: '" + source.name + "' has " +
+                        str(len(source.devices)) + " device(s)")
+                device = source.devices[device_index]
             device_name = device.name
 
-            destination = source if to_track_index is None else self._resolve_track(to_track_index)
+            if to_path is not None:
+                destination, kind = self._resolve_device_path(
+                    track_index if to_track_index is None else to_track_index, to_path)
+                if kind != "chain":
+                    raise ValueError(
+                        "to_path must point at a chain, so it needs an even number of "
+                        "segments - '0.0' is the first chain of the first device")
+            elif to_track_index is None:
+                destination = source
+            else:
+                destination = self._resolve_track(to_track_index)
             requested = int(to_position)
 
             landing = self._song.find_device_position(device, destination, requested)
@@ -1081,7 +1252,8 @@ class AbletonMCP(ControlSurface):
                 "from_track_name": source.name,
                 "from_device_index": device_index,
                 "to_track_index": track_index if to_track_index is None else to_track_index,
-                "to_track_name": destination.name,
+                "to_name": destination.name,
+                "to_path": to_path,
                 "requested_position": requested,
                 "final_position": actual,
                 "adjusted": actual != requested,
@@ -1091,9 +1263,42 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error moving device: " + str(e))
             raise
 
-    def _delete_device(self, track_index, device_index):
-        """Remove one device from a track's chain"""
+    def _delete_device(self, track_index, device_index, device_path=None):
+        """Remove one device, from a track's chain or from inside a rack"""
         try:
+            if device_path is not None:
+                # The owner is the container one level up, so the last segment is the
+                # index to delete and everything before it names the container.
+                segments = [seg for seg in str(device_path).split(".") if seg != ""]
+                if not segments:
+                    raise ValueError("device_path needs at least one index")
+                if len(segments) % 2 == 0:
+                    raise ValueError(
+                        "device_path must point at a device, not a chain - an odd number "
+                        "of segments, like '0' or '0.0.1'")
+                target_index = int(segments[-1])
+                if len(segments) == 1:
+                    owner = self._resolve_track(track_index)
+                    owner_name = owner.name
+                else:
+                    owner, kind = self._resolve_device_path(
+                        track_index, ".".join(segments[:-1]))
+                    owner_name = owner.name
+                if target_index < 0 or target_index >= len(owner.devices):
+                    raise IndexError(
+                        "No device " + str(target_index) + " in '" + owner_name +
+                        "'; there are " + str(len(owner.devices)))
+                device_name = owner.devices[target_index].name
+                owner.delete_device(target_index)
+                return {
+                    "success": True,
+                    "track_index": track_index,
+                    "track_name": owner_name,
+                    "device_path": device_path,
+                    "deleted_device_name": device_name,
+                    "remaining_devices": [d.name for d in owner.devices]
+                }
+
             if device_index == -1:
                 raise ValueError(
                     "device_index -1 addresses the mixer, which is part of the track and "
@@ -1229,9 +1434,21 @@ class AbletonMCP(ControlSurface):
             raise IndexError("Track index out of range")
         return self._song.tracks[track_index]
 
-    def _get_parameter_entries(self, track_index, device_index):
+    def _get_parameter_entries(self, track_index, device_index, device_path=None):
         """Resolve a track+device to (entries, owner_name, class_name).
-        track_index == -1 addresses the master track, device_index == -1 the mixer."""
+
+        track_index == -1 addresses the master track and device_index == -1 the mixer.
+        device_path overrides device_index and reaches devices nested inside racks, so
+        a plugin sitting on one drum pad is as addressable as one on the track."""
+        if device_path is not None:
+            node, kind = self._resolve_device_path(track_index, device_path)
+            if kind != "device":
+                raise ValueError(
+                    "device_path must point at a device, not a chain - an odd number of "
+                    "segments, like '0' or '0.0.0.2.1'")
+            return ([(param.name, param) for param in node.parameters],
+                    node.name, node.class_name)
+
         track = self._resolve_track(track_index)
 
         if device_index == -1:
@@ -1243,9 +1460,11 @@ class AbletonMCP(ControlSurface):
         entries = [(param.name, param) for param in device.parameters]
         return entries, device.name, device.class_name
 
-    def _resolve_parameter(self, track_index, device_index, parameter_index, parameter_name):
+    def _resolve_parameter(self, track_index, device_index, parameter_index,
+                           parameter_name, device_path=None):
         """Look up a single DeviceParameter by index or by (case-insensitive) name."""
-        entries, owner_name, _ = self._get_parameter_entries(track_index, device_index)
+        entries, owner_name, _ = self._get_parameter_entries(
+            track_index, device_index, device_path)
 
         if parameter_index is not None:
             if parameter_index < 0 or parameter_index >= len(entries):
@@ -1415,11 +1634,11 @@ class AbletonMCP(ControlSurface):
         }
 
     def _convert_display_values(self, track_index, device_index, parameter_index,
-                                parameter_name, targets):
+                                parameter_name, targets, device_path=None):
         """Resolve displayed magnitudes to raw values without changing anything"""
         try:
             param, owner_name, resolved_index = self._resolve_parameter(
-                track_index, device_index, parameter_index, parameter_name)
+                track_index, device_index, parameter_index, parameter_name, device_path)
             if not isinstance(targets, (list, tuple)):
                 targets = [targets]
             return {
@@ -1437,11 +1656,11 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _set_parameter_to_display(self, track_index, device_index, parameter_index,
-                                  parameter_name, target):
+                                  parameter_name, target, device_path=None):
         """Set a parameter by the value it should read on screen, e.g. 2000 for 2 kHz"""
         try:
             param, owner_name, resolved_index = self._resolve_parameter(
-                track_index, device_index, parameter_index, parameter_name)
+                track_index, device_index, parameter_index, parameter_name, device_path)
             if not getattr(param, "is_enabled", True):
                 raise RuntimeError("Parameter '" + param.name + "' on '" + owner_name +
                                    "' is not currently settable")
@@ -1494,10 +1713,11 @@ class AbletonMCP(ControlSurface):
             coerced = float(int(round(coerced)))
         return coerced
 
-    def _get_device_parameters(self, track_index, device_index):
+    def _get_device_parameters(self, track_index, device_index, device_path=None):
         """List every parameter of a device (or the mixer, with device_index -1)"""
         try:
-            entries, owner_name, class_name = self._get_parameter_entries(track_index, device_index)
+            entries, owner_name, class_name = self._get_parameter_entries(
+                track_index, device_index, device_path)
             return {
                 "track_index": track_index,
                 "track_name": self._resolve_track(track_index).name,
@@ -1512,11 +1732,11 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _set_device_parameter(self, track_index, device_index, parameter_index,
-                              parameter_name, value):
+                              parameter_name, value, device_path=None):
         """Set a single device (or mixer) parameter to a value"""
         try:
             param, owner_name, resolved_index = self._resolve_parameter(
-                track_index, device_index, parameter_index, parameter_name)
+                track_index, device_index, parameter_index, parameter_name, device_path)
 
             if not getattr(param, "is_enabled", True):
                 raise RuntimeError("Parameter '" + param.name + "' on '" + owner_name +
@@ -1556,7 +1776,8 @@ class AbletonMCP(ControlSurface):
         return clip_slot.clip
 
     def _set_clip_envelope(self, track_index, clip_index, device_index, parameter_index,
-                           parameter_name, points, interpolate, step_size, clear_existing):
+                           parameter_name, points, interpolate, step_size, clear_existing,
+                           device_path=None):
         """Write a clip automation envelope for a device/mixer parameter.
 
         points is a list of {time, value, length?} breakpoints in beats. Live's API only
@@ -1564,7 +1785,7 @@ class AbletonMCP(ControlSurface):
         consecutive points with a series of step_size-wide steps."""
         try:
             param, owner_name, resolved_index = self._resolve_parameter(
-                track_index, device_index, parameter_index, parameter_name)
+                track_index, device_index, parameter_index, parameter_name, device_path)
             clip = self._get_clip_for_envelope(track_index, clip_index)
 
             if not points:
@@ -1928,14 +2149,14 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _get_clip_envelope(self, track_index, clip_index, device_index, parameter_index,
-                           parameter_name, from_time, to_time, samples):
+                           parameter_name, from_time, to_time, samples, device_path=None):
         """Sample an existing clip envelope at evenly spaced times.
 
         Live exposes no way to enumerate an envelope's breakpoints, so the shape is
         reconstructed by evaluating value_at_time() across the requested range."""
         try:
             param, owner_name, resolved_index = self._resolve_parameter(
-                track_index, device_index, parameter_index, parameter_name)
+                track_index, device_index, parameter_index, parameter_name, device_path)
             clip = self._get_clip_for_envelope(track_index, clip_index)
 
             result = {
@@ -1993,11 +2214,11 @@ class AbletonMCP(ControlSurface):
             raise
 
     def _clear_clip_envelope(self, track_index, clip_index, device_index,
-                             parameter_index, parameter_name):
+                             parameter_index, parameter_name, device_path=None):
         """Remove the clip automation envelope for a device/mixer parameter"""
         try:
             param, owner_name, resolved_index = self._resolve_parameter(
-                track_index, device_index, parameter_index, parameter_name)
+                track_index, device_index, parameter_index, parameter_name, device_path)
             clip = self._get_clip_for_envelope(track_index, clip_index)
             clip.clear_envelope(param)
             return {

@@ -14,7 +14,7 @@ parameters inside clips.
 >
 > 1. **Mixing was added.** Upstream can create tracks, clips and notes and load devices, but
 >    cannot touch a device's parameters, write automation, reach the master or return tracks,
->    or remove anything it has added. This fork adds eighteen tools covering that ground
+>    or remove anything it has added. This fork adds twenty tools covering that ground
 >    (see [What this fork adds](#what-this-fork-adds)).
 > 2. **Telemetry was removed.** Upstream ships an opt-out telemetry client that reports usage
 >    to the author's Supabase project. This fork removes it entirely
@@ -35,12 +35,13 @@ parameters inside clips.
 - **Real-unit mixing**: target parameters by what they display — "2 kHz", "-12 dB", "140%" *(fork)*
 - **Master and returns**: reachable through negative track indices, sends included *(fork)*
 - **Removal**: delete devices, clips and tracks, not just create them *(fork)*
+- **Inside racks**: reach, process and automate a single drum pad or rack chain *(fork)*
 - **Arrangement view composition**: build full songs in Arrangement View
 - **Session control**: playback, clip firing, transport across Session and Arrangement View
 
 ## What this fork adds
 
-Eighteen tools, plus the matching commands in the Remote Script:
+Twenty tools, plus the matching commands in the Remote Script:
 
 | Tool | Purpose |
 | --- | --- |
@@ -57,7 +58,9 @@ Eighteen tools, plus the matching commands in the Remote Script:
 | `clear_clip_envelope` | Remove a parameter's clip envelope |
 | `set_parameter_to_display` | Set a parameter by what it should read on screen ("2 kHz", "-12 dB") |
 | `convert_display_values` | Translate on-screen magnitudes into raw values, changing nothing |
-| `move_device` | Reorder a device in its chain, or move it to another track |
+| `move_device` | Reorder a device in its chain, or move it into another chain or track |
+| `get_device_tree` | List a track's devices including everything nested inside racks |
+| `load_device_into_chain` | Load a device into one chain of a rack, not onto the track |
 | `delete_device` | Remove one device from a track's chain |
 | `describe_live_api` | Inspect Live's own API from inside the running application |
 | `delete_clip` | Delete the clip in a Session slot |
@@ -98,6 +101,31 @@ Live quietly settles for the nearest legal position when the requested one is im
 so the move is checked with `find_device_position` first: the reply says where the device
 actually landed and flags any difference, and moves that cannot work at all (an instrument
 onto an audio track) are refused rather than relocated.
+
+### Working inside racks
+
+`get_track_info` stops at the top level, which is not where a drum kit keeps anything
+interesting. A factory kit is usually an Instrument Rack holding a Drum Rack whose every
+pad is a chain with its own devices, so "put a delay on the snare and nothing else" is
+several levels down from the track.
+
+`get_device_tree` walks that structure and hands back a path for every node. Indices
+alternate between devices and chains: `0` is the first device on the track, `0.0` its
+first chain, `0.0.1` the second device inside that chain. An odd number of segments
+always names a device, an even number a chain. Chains belonging to drum pads also report
+the MIDI note that triggers them, so a snare can be found by note rather than by counting.
+
+Those paths work throughout: `load_device_into_chain` puts a plugin on one pad,
+`move_device` takes `from_path` and `to_path`, `delete_device` takes `device_path`, and
+every parameter tool — reading, setting, targeting by display value, and all three
+envelope operations — accepts `device_path`. A plugin on a single drum pad is therefore
+as controllable as one sitting on the track, automation included.
+
+Two things Live enforces, both reported rather than worked around: a chain holds one
+instrument, so an existing one must be deleted before another will fit, and the browser
+can only append to a track — `load_device_into_chain` loads and then moves, in separate
+steps, because a device added during one Remote Script turn is not yet visible to code
+later in that same turn.
 
 ### Reaching your own sample folders
 
