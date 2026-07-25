@@ -14,7 +14,7 @@ parameters inside clips.
 >
 > 1. **Mixing was added.** Upstream can create tracks, clips and notes and load devices, but
 >    cannot touch a device's parameters, write automation, reach the master or return tracks,
->    or remove anything it has added. This fork adds sixteen tools covering that ground
+>    or remove anything it has added. This fork adds eighteen tools covering that ground
 >    (see [What this fork adds](#what-this-fork-adds)).
 > 2. **Telemetry was removed.** Upstream ships an opt-out telemetry client that reports usage
 >    to the author's Supabase project. This fork removes it entirely
@@ -39,7 +39,7 @@ parameters inside clips.
 
 ## What this fork adds
 
-Sixteen tools, plus the matching commands in the Remote Script:
+Eighteen tools, plus the matching commands in the Remote Script:
 
 | Tool | Purpose |
 | --- | --- |
@@ -56,7 +56,9 @@ Sixteen tools, plus the matching commands in the Remote Script:
 | `clear_clip_envelope` | Remove a parameter's clip envelope |
 | `set_parameter_to_display` | Set a parameter by what it should read on screen ("2 kHz", "-12 dB") |
 | `convert_display_values` | Translate on-screen magnitudes into raw values, changing nothing |
+| `move_device` | Reorder a device in its chain, or move it to another track |
 | `delete_device` | Remove one device from a track's chain |
+| `describe_live_api` | Inspect Live's own API from inside the running application |
 | `delete_clip` | Delete the clip in a Session slot |
 | `delete_track` | Delete a track with its clips and devices |
 
@@ -84,6 +86,26 @@ destroyed, so its envelopes stay put:
 
 note_ids describe the clip's current contents and are reissued when notes are removed and
 re-added, so re-read between rounds of edits rather than reusing a stale list.
+
+### Device order
+
+Devices load at the end of a chain, but order changes the sound. `move_device` reorders an
+existing device — settings and automation travel with it, which reloading would lose — and
+can also hand a device to another track.
+
+Live quietly settles for the nearest legal position when the requested one is impossible,
+so the move is checked with `find_device_position` first: the reply says where the device
+actually landed and flags any difference, and moves that cannot work at all (an instrument
+onto an audio track) are refused rather than relocated.
+
+### Asking Live what it can do
+
+`describe_live_api` is a development aid, not a music tool. Live's Python API is
+Boost.Python, which stores each method's real signature in its docstring, so this answers
+"what arguments does `move_device` take" from the build in front of you rather than from
+documentation that may not match it. It also lists members that *raise* on access — Live
+signals an inapplicable property by throwing, which is easy to mistake for a bug elsewhere,
+and which cost this fork several debugging rounds before the pattern became obvious.
 
 ### Mixing in real units
 

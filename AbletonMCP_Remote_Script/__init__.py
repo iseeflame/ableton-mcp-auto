@@ -243,6 +243,8 @@ class AbletonMCP(ControlSurface):
                                  "delete_clip", "delete_track", "delete_device",
                                  # Note editing - must run on the main thread
                                  "remove_clip_notes", "modify_clip_notes",
+                                 # Device chain order – must run on the main thread
+                                 "move_device",
                                  # Display-value targeting – must run on the main thread
                                  "set_parameter_to_display"]:
                 # Use a thread-safe approach with a response queue
@@ -359,6 +361,12 @@ class AbletonMCP(ControlSurface):
                                 params.get("clip_index", 0))
                         elif command_type == "delete_track":
                             result = self._delete_track(params.get("track_index", 0))
+                        elif command_type == "move_device":
+                            result = self._move_device(
+                                params.get("track_index", 0),
+                                params.get("device_index", 0),
+                                params.get("to_position", 0),
+                                params.get("to_track_index", None))
                         elif command_type == "remove_clip_notes":
                             result = self._remove_clip_notes(
                                 params.get("track_index", 0),
@@ -452,6 +460,10 @@ class AbletonMCP(ControlSurface):
                     params.get("time_span", None),
                     params.get("from_pitch", 0),
                     params.get("pitch_span", 128))
+            elif command_type == "describe_live_api":
+                response["result"] = self._describe_live_api(
+                    params.get("path", ""),
+                    params.get("include_members", True))
             elif command_type == "convert_display_values":
                 response["result"] = self._convert_display_values(
                     params.get("track_index", 0),
@@ -1033,6 +1045,51 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error deleting clip: " + str(e))
             raise
 
+    def _move_device(self, track_index, device_index, to_position, to_track_index):
+        """Reorder a device within its chain, or move it onto another track.
+
+        Position 0 puts it before everything, len(devices) at the end. Live silently
+        settles for the nearest legal position when the requested one is impossible,
+        so find_device_position is consulted first and any difference is reported
+        rather than passed off as success."""
+        try:
+            source = self._resolve_track(track_index)
+            if device_index < 0 or device_index >= len(source.devices):
+                raise IndexError(
+                    "Device index out of range: '" + source.name + "' has " +
+                    str(len(source.devices)) + " device(s)")
+            device = source.devices[device_index]
+            device_name = device.name
+
+            destination = source if to_track_index is None else self._resolve_track(to_track_index)
+            requested = int(to_position)
+
+            landing = self._song.find_device_position(device, destination, requested)
+            if landing < 0:
+                raise ValueError(
+                    "'" + device_name + "' cannot go into '" + destination.name +
+                    "' at all - an instrument will not fit an audio track, and a MIDI "
+                    "effect will not fit after an instrument.")
+
+            actual = self._song.move_device(device, destination, requested)
+
+            return {
+                "success": True,
+                "device_name": device_name,
+                "from_track_index": track_index,
+                "from_track_name": source.name,
+                "from_device_index": device_index,
+                "to_track_index": track_index if to_track_index is None else to_track_index,
+                "to_track_name": destination.name,
+                "requested_position": requested,
+                "final_position": actual,
+                "adjusted": actual != requested,
+                "chain": [d.name for d in destination.devices]
+            }
+        except Exception as e:
+            self.log_message("Error moving device: " + str(e))
+            raise
+
     def _delete_device(self, track_index, device_index):
         """Remove one device from a track's chain"""
         try:
@@ -1605,6 +1662,67 @@ class AbletonMCP(ControlSurface):
     # Bounds on how finely an envelope may be sampled in one read.
     MIN_ENVELOPE_SAMPLES = 2
     MAX_ENVELOPE_SAMPLES = 512
+
+    def _describe_live_api(self, path, include_members):
+        """Report what Live's own objects expose, resolved from song by dotted path.
+
+        The Live API is Boost.Python, which keeps each method's signature in its
+        __doc__, so this answers "what arguments does move_device take" from the
+        running application rather than from documentation that may not match this
+        build. Numeric path segments index into lists: "tracks.0.devices.0".
+
+        Read-only: it resolves attributes and reads docstrings, never calls anything."""
+        try:
+            target = self._song
+            walked = ["song"]
+            for segment in [p for p in str(path).split(".") if p]:
+                if segment.lstrip("-").isdigit():
+                    target = target[int(segment)]
+                else:
+                    target = getattr(target, segment)
+                walked.append(segment)
+
+            result = {
+                "path": ".".join(walked),
+                "type": type(target).__name__,
+                "callable": callable(target)
+            }
+
+            doc = getattr(target, "__doc__", None)
+            if doc:
+                # Boost.Python packs the signature into the first lines of __doc__.
+                result["doc"] = str(doc)[:2000]
+
+            if not callable(target):
+                try:
+                    result["value"] = str(target)[:200]
+                except Exception:
+                    pass
+                try:
+                    result["length"] = len(target)
+                except Exception:
+                    pass
+
+            if include_members:
+                methods, properties = [], []
+                for name in dir(target):
+                    if name.startswith("_"):
+                        continue
+                    try:
+                        member = getattr(target, name)
+                    except Exception:
+                        # Live raises on members that do not apply to this object;
+                        # that is itself worth reporting rather than hiding.
+                        properties.append(name + " (raises on access)")
+                        continue
+                    (methods if callable(member) else properties).append(name)
+                result["methods"] = methods
+                result["properties"] = properties
+
+            return result
+        except Exception as e:
+            self.log_message("Error describing Live API: " + str(e))
+            raise
 
     def _get_clip_notes(self, track_index, clip_index, from_time, time_span,
                         from_pitch, pitch_span):

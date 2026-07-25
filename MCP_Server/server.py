@@ -1492,6 +1492,97 @@ def delete_clip(ctx: Context, track_index: int, clip_index: int) -> str:
 
 
 @mcp.tool()
+@telemetry_tool("move_device")
+def move_device(
+    ctx: Context,
+    track_index: int,
+    device_index: int,
+    to_position: int,
+    to_track_index: Optional[int] = None
+) -> str:
+    """
+    Reorder a device within its chain, or move it onto another track.
+
+    Devices load at the end of a chain, but order changes the sound: an EQ before a
+    saturator is a different result from an EQ after it. This moves an existing device
+    without reloading it, so its settings and automation come along.
+
+    Position 0 puts the device before everything else, and len(devices) puts it last;
+    get_track_info lists the current chain. Live settles for the nearest legal position
+    when the requested one is impossible, so the reply reports where the device actually
+    landed and says so when that differs from the request.
+
+    Moves that make no sense — an instrument onto an audio track, a MIDI effect after an
+    instrument — are rejected outright rather than quietly relocated.
+
+    Parameters:
+    - track_index:    Index of the track the device is on now
+    - device_index:   Index of the device in that track's chain
+    - to_position:    Target slot: 0 is first, len(devices) is last
+    - to_track_index: Move to a different track instead; omit to reorder in place
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("move_device", {
+            "track_index": track_index,
+            "device_index": device_index,
+            "to_position": to_position,
+            "to_track_index": to_track_index
+        })
+        chain = result.get("chain") or []
+        message = (
+            f"Moved '{result.get('device_name')}' to position "
+            f"{result.get('final_position')} on '{result.get('to_track_name')}'. "
+            f"Chain is now: {' > '.join(chain)}"
+        )
+        if result.get("adjusted"):
+            message += (
+                f"; position {result.get('requested_position')} was not possible, so the "
+                f"nearest legal slot was used"
+            )
+        return message
+    except Exception as e:
+        logger.error(f"Error moving device: {str(e)}")
+        return f"Error moving device: {str(e)}"
+
+
+@mcp.tool()
+@telemetry_tool("describe_live_api")
+def describe_live_api(ctx: Context, path: str = "", include_members: bool = True) -> str:
+    """
+    Inspect Live's own API from inside the running application.
+
+    A development aid rather than a music tool. Live's Python API is Boost.Python, which
+    keeps each method's real signature in its docstring, so this answers "what arguments
+    does move_device take" or "what can a Clip actually do" from the build in front of
+    you, instead of from documentation that may not match it.
+
+    Paths are dotted and start at the song: "" for the song itself, "move_device" for one
+    of its methods, "tracks.0.devices.0" for a device, "tracks.0.clip_slots.0.clip" for a
+    clip. Numeric segments index into lists.
+
+    Members that raise on access are listed as such rather than hidden — Live signals an
+    inapplicable property by throwing, which is easy to mistake for a bug elsewhere.
+
+    Read-only: it resolves attributes and reads docstrings, and never calls anything.
+
+    Parameters:
+    - path:            Dotted path from the song object (default: the song itself)
+    - include_members: List the object's methods and properties (default true)
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("describe_live_api", {
+            "path": path,
+            "include_members": include_members
+        })
+        return json.dumps(result, indent=2)
+    except Exception as e:
+        logger.error(f"Error describing Live API: {str(e)}")
+        return f"Error describing Live API: {str(e)}"
+
+
+@mcp.tool()
 @telemetry_tool("delete_device")
 def delete_device(ctx: Context, track_index: int, device_index: int) -> str:
     """
